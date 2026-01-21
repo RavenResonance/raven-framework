@@ -1,0 +1,50 @@
+{
+  "resolution": {
+    "DISPLAY_RESOLUTION": [720, 720],
+    "APP_RESOLUTION": [640, 640]
+  },
+  "fps": {
+    "UI_FPS": 30,
+    "SIMULATOR_FPS": 30
+  },
+  "deployment": {
+    "BASE_API_URL": "https://v1.apps.s.raven.computer/",
+    "ACCEPTING_DEPLOYMENTS": false,
+    "PYTHON_VERSION_ON_RAVEN_DEVICE": "3.12.12"
+  },
+  "peripherals": {
+    "DEFAULT_CAMERA_INDEX": 0,
+    "INITIAL_CAMERA_FRAMES_TO_DISCARD": 5,
+    "AUDIO_READ_INTERVAL_MS": 20
+  },
+  "display": {
+    "QT_DEGREES_TO_UNITS": 16,
+    "STANDARD_DPI": 96.0
+  },
+  "asset_paths": {
+    "AUDIO_CLICK_PATH": "audio/raven_click.wav",
+    "HOME_ICON_PATH": "assets/icons/home.png",
+    "ACTION_BUTTON_ICON_PATH": "assets/icons/action_button.png"
+  },
+  "simulator": {
+    "DEFAULT_OVERLAY_BRIGHTNESS": 0.9,
+    "SNAPSHOT_TMP_DIR": "tmp",
+    "SNAPSHOT_FILENAME": "widget_snapshot.png",
+    "OVERLAY_BACKGROUND_VIDEO_DAY_PATH": "assets/overlay_background_videos/day.mp4",
+    "OVERLAY_BACKGROUND_VIDEO_NIGHT_PATH": "assets/overlay_background_videos/night.mp4",
+    "OVERLAY_BACKGROUND_VIDEO_OUTDOORS_PATH": "assets/overlay_background_videos/outdoor.mp4"
+  },
+  "logger": {
+    "LOG_NAME": "raven_log",
+    "DOCKERENV_PATH": "/.dockerenv",
+    "CONTAINER_ENV_VAR": "CONTAINER",
+    "CONTAINER_LOG_DIR": "/tmp/raven_logs",
+    "LOG_SUBDIR": "logs",
+    "BYTES_PER_KB": 1024,
+    "MAX_LOG_SIZE_MB": 5,
+    "BACKUP_COUNT": 5,
+    "ENABLE_FILE_LOGGING": true,
+    "ENABLE_CONSOLE_LOGGING": true
+  }
+}
+
