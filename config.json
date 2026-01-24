@@ -15,7 +15,8 @@
   "peripherals": {
     "DEFAULT_CAMERA_INDEX": 0,
     "INITIAL_CAMERA_FRAMES_TO_DISCARD": 5,
-    "AUDIO_READ_INTERVAL_MS": 20
+    "AUDIO_READ_INTERVAL_MS": 20,
+    "SIMULATOR_ACCEL_SCALE": 2.0
   },
   "display": {
     "QT_DEGREES_TO_UNITS": 16,
