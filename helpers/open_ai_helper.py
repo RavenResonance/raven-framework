@@ -85,8 +85,8 @@ class OpenAiHelper:
             log.info(f"Transcribed text: {text}")
             return text
         except Exception as e:
-            log.error(f"Audio transcription failed: {e}", exc_info=True)
-            return ""
+            log.error(f"Error:Audio transcription failed: {e}", exc_info=True)
+            return f"Error:Audio transcription failed: {e}"
 
     def get_text_response(self, prompt: str, model: str = "gpt-4o") -> str:
         """
@@ -111,8 +111,8 @@ class OpenAiHelper:
             log.info(f"Text response: {text}")
             return text
         except Exception as e:
-            log.error(f"Text response failed: {e}", exc_info=True)
-            return ""
+            log.error(f"Error: Text response failed: {e}", exc_info=True)
+            return f"Error:Text response failed: {e}"
 
     def generate_tts(
         self,
@@ -145,10 +145,10 @@ class OpenAiHelper:
             )
             audio_bytes = response.read()
             log.info("TTS generation successful")
-            return audio_bytes
+            return f"TTS generation successful: {audio_bytes}"
         except Exception as e:
-            log.error(f"TTS generation failed: {e}", exc_info=True)
-            return b""
+            log.error(f"Error:TTS generation failed: {e}", exc_info=True)
+            return f"Error:TTS generation failed: {e}"
 
     def process_multimodal_with_image(
         self, prompt: str, image: np.ndarray, model: str = "gpt-4o"
@@ -165,8 +165,8 @@ class OpenAiHelper:
             str: Model's response text or empty string on failure.
         """
         if not self.client:
-            log.error("OpenAI client not initialized")
-            return ""
+            log.error("Error: OpenAI client not initialized")
+            return "Error:OpenAI client not initialized"
         try:
             base64_image = convert_ndarray_to_base64_image(image)
             log.debug("Image converted to base64.")
@@ -192,8 +192,8 @@ class OpenAiHelper:
             log.info(f"Multimodal response: {reply}")
             return reply
         except Exception as e:
-            log.error(f"Multimodal processing failed: {e}", exc_info=True)
-            return ""
+            log.error(f"Error: Multimodal processing failed: {e}", exc_info=True)
+            return f"Error: Multimodal processing failed: {e}"
 
     def structured_text_response(
         self,
@@ -219,8 +219,8 @@ class OpenAiHelper:
                   The actual return type depends on the structure parameter (e.g., dict, Pydantic model, etc.).
         """
         if not self.client:
-            log.error("OpenAI client not initialized")
-            return ""
+            log.error("Error: OpenAI client not initialized")
+            return "Error: OpenAI client not initialized"
         try:
             response = self.client.responses.parse(
                 model=model,
@@ -237,5 +237,5 @@ class OpenAiHelper:
             log.info(f"Structured response received: {output}")
             return output
         except Exception as e:
-            log.warning(f"Structured text response failed: {e}", exc_info=True)
-            return ""
+            log.warning(f"Error: Structured text response failed: {e}", exc_info=True)
+            return f"Error: Structured text response failed: {e}"
