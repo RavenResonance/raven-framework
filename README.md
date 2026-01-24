@@ -790,7 +790,7 @@ See detailed params and functions in `raven_framework/peripherals/microphone.py`
 
 ### IMU
 
-IMU (Inertial Measurement Unit) sensor for reading accelerometer, gyroscope, and magnetometer data. **Note:** Cannot be simulated in simulator mode.
+IMU (Inertial Measurement Unit) sensor for reading accelerometer, gyroscope, and magnetometer data. **Note:** In simulator mode, arrow keys can be used to simulate accelerometer readings (Up/Down for Y-axis, Left/Right for X-axis).
 
 ```python
 from raven_framework.peripherals.imu import IMU

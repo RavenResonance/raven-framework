@@ -501,7 +501,7 @@ level = mic.get_level()  # Returns float (0.0 to 1.0)
 
 ### IMU
 
-**Note:** Cannot be simulated in simulator mode.
+**Note:** In simulator mode, arrow keys can be used to simulate accelerometer readings. Use Up/Down arrow keys for Y-axis acceleration and Left/Right arrow keys for X-axis acceleration.
 
 ```python
 from raven_framework.peripherals.imu import IMU
