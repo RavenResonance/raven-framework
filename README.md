@@ -21,6 +21,7 @@ The framework is being developed by Raven Resonance, a small team building AR gl
   - [Cards](#cards)
 - [Peripherals](#peripherals)
 - [Helpers](#helpers)
+- [Hardware Specifications](#hardware-specifications)
 - [Designing for Raven OS](#designing-for-raven-os)
 - [Examples](#examples)
 - [Building Apps with AI](#building-apps-with-ai)
@@ -80,6 +81,8 @@ Note: To close an app, use the home icon in the top right corner.
 
 ## UI Widgets
 
+**Note:** All components inherit from PySide6's `QWidget` class, so standard Qt methods like `hide()`, `show()`, `move()`, `resize()`, etc. are still available and work as expected.
+
 ### Layout
 
 #### Container
@@ -98,6 +101,11 @@ container = Container()
 Container with fixed size:
 ```python
 container = Container(width=640, height=640)
+```
+
+Container with spacing:
+```python
+container = Container(spacing=10)
 ```
 
 Container with inner margins:
@@ -157,6 +165,11 @@ Container with fixed size:
 vbox = VerticalContainer(width=640, height=480)
 ```
 
+Container with spacing:
+```python
+vbox = VerticalContainer(spacing=10)
+```
+
 Container with inner margins:
 
 Uniform margin (all sides):
@@ -206,6 +219,11 @@ hbox = HorizontalContainer()
 Container with fixed size:
 ```python
 hbox = HorizontalContainer(width=640, height=100)
+```
+
+Container with spacing:
+```python
+hbox = HorizontalContainer(spacing=10)
 ```
 
 Container with inner margins:
@@ -311,6 +329,8 @@ button = Button(center_text="Click Me")
 ```
 
 <img src="assets/documentation/buttons/simple_button.png" width="190" alt="Simple Button">
+
+**Note:** Buttons automatically adjust their width and height based on the text content inside. Only specify `width` and `height` parameters if you absolutely need a fixed size.
 
 Button with custom size:
 ```python
@@ -545,6 +565,22 @@ scroll = ScrollView(content_widget=vbox, width=480, height=540, enable_continuou
 **Frequently used methods:** `scroll_next()`, `scroll_prev()`, `start_auto_scroll`, `stop_auto_scroll()`, `clear()`
 
 See detailed params and functions in `raven_framework/components/scroll_view.py`
+
+#### Model Viewer
+
+Displays 3D models from OBJ files with OpenGL rendering.
+
+```python
+from raven_framework.components.model_viewer import ModelViewer
+
+viewer = ModelViewer(model_path="assets/model.obj", width=400, height=400)
+```
+
+**Note:** Raven Glass only supports OpenGL ES 2.0, not Vulkan or OpenGL ES 3.x. The ModelViewer automatically uses the appropriate OpenGL context based on the platform.
+
+**Frequently used params:** `model_path` (str), `width` (int), `height` (int)
+
+See detailed params and functions in `raven_framework/components/model_viewer.py`
 
 ### Cards
 
@@ -837,7 +873,7 @@ See detailed params and functions in `raven_framework/peripherals/eye_tracker.py
 
 Speaker for asynchronous playback of WAV audio bytes.
 
-**Note:** In simulator mode, audio playback requires the `audio-simulator` optional dependency. Install it with `pip install -e .[audio-simulator]` or `pip install simpleaudio`. Note that `simpleaudio` may not have pre-built binaries available for all Linux and Windows systems, which can cause installation to fail. If `simpleaudio` is not available, the framework will log a warning and audio playback will not work in simulator mode (but will still work on Raven devices).
+**Note:** In simulator mode, audio playback requires the `audio-simulator` optional dependency. Install it with `pip install -e ".[audio-simulator]"` or `pip install simpleaudio`. Note that `simpleaudio` may not have pre-built binaries available for all Linux and Windows systems, which can cause installation to fail. If `simpleaudio` is not available, the framework will log a warning and audio playback will not work in simulator mode (but will still work on Raven devices).
 
 ```python
 from raven_framework.peripherals.speaker import Speaker
@@ -888,6 +924,7 @@ Frequently used methods:
 
 See detailed params and functions in `raven_framework/peripherals/click_button.py`
 
+**Note:** Additional peripheral support, including spatial microphone and sound processing, and enhanced click button controls, will be added in future releases of the framework.
 
 ## Helpers
 
@@ -983,6 +1020,8 @@ Run task:
 runner.run(long_task, on_complete=callback)
 ```
 
+**Important:** Do not update UI components (like buttons or text boxes) directly from background threads. Always update UI components in the `on_complete` callback, which runs on the main thread. Updating UI from separate threads can cause crashes or undefined behavior.
+
 Frequently used methods:
 - `run(func: Callable, on_complete: Callable | None = None) -> None`: Execute a function asynchronously in a background thread
 
@@ -1073,6 +1112,24 @@ Frequently used methods:
 - `generate_tts(text: str, model: str = "tts-1", voice: str = "alloy", response_format: str = "wav") -> bytes`: Generate speech audio from text using TTS model
 
 See detailed params and functions in `raven_framework/helpers/open_ai_helper.py`
+
+## Hardware Specifications
+
+Raven Glass v1 hardware specifications:
+
+* **Operating System:** RavenOS (Linux-based)
+* **Processor:** Quad-core 64-bit ARM processor
+* **Graphics:** GPU with OpenGL ES 2.0 support
+* **Display:** 30 degree diagonal FoV, full-color waveguide display on the right eye
+* **Primary Input:** Eye control sensors
+* **Connectivity:** WiFi & Bluetooth
+* **Audio Input:** Multiple microphones
+* **Audio Output:** 2 downward-facing speakers
+* **Camera:** World-facing camera
+* **Motion Sensors:** IMU
+* **Power:** Raven Wings™ hot-swappable batteries
+* **Indicators:** Beakon™ lights
+* **Environmental Sensors:** Ambient light and proximity sensors
 
 ## Designing for Raven OS
 
