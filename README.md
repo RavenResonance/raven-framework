@@ -1133,7 +1133,9 @@ Raven Glass v1 hardware specifications:
 
 ## Building Apps Without the Python Framework
 
-Raven Glass runs Linux on 64-bit ARM (ARM64), so you can run essentially any ARM64 Linux program/runtime (Go, Rust, Node, C/C++, etc.)—you are not limited to this Python framework. The platform has a default runtime entrypoint at [`core/run.sh`](core/run.sh). By default it runs `python3 main.py` (or `python3 main.pyc` if present). If your app provides its own `run.sh`, that will override the default. Before choosing a stack, review the [Hardware Specifications](#hardware-specifications) and note the display is 720×720 (see [Designing for Raven OS](#designing-for-raven-os)).
+Raven Glass runs RavenOS (which is based on Linux), so you can run essentially any ARM64 Linux program/runtime (Go, Rust, Node, C/C++, etc.)—you are not limited to this Python framework. The platform has a default runtime entrypoint at [`core/run.sh`](core/run.sh). By default it runs `python3 main.py` (or `python3 main.pyc` if present). If your app provides its own `run.sh`, that will override the default. Before choosing a stack, review the [Hardware Specifications](#hardware-specifications) and note the display is 720×720 (see [Designing for Raven OS](#designing-for-raven-os)). 
+
+> **Note:** Additional support will be added to access glasses peripherals via Unix sockets. Like this SDK, all sockets will require special entitlement from the developer site for publishing, but not for development apps.
 
 ## Designing for Raven OS
 
