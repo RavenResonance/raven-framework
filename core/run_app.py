@@ -1473,6 +1473,18 @@ class RunApp(QMainWindow):
             if os.path.exists(requirements_path):
                 shutil.copy2(requirements_path, temp_dir)
                 log.info("Copied requirements.txt")
+            
+            # Copy default run.sh if one is not provided by the app
+            build_run_sh_path = os.path.join(temp_dir, "run.sh")
+            if not os.path.exists(build_run_sh_path):
+                default_run_sh_path = os.path.join(os.path.dirname(__file__), "run.sh")
+                if os.path.exists(default_run_sh_path):
+                    shutil.copy2(default_run_sh_path, build_run_sh_path)
+                    log.info("Added default run.sh")
+                else:
+                    log.warning(
+                        f"Default run.sh not found at {default_run_sh_path}; skipping"
+                    )
 
             # Create .rav zip file and collect package structure details
             package_stats = {
