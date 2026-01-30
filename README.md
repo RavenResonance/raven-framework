@@ -9,7 +9,7 @@ A comprehensive UI framework and API for building gaze-based applications for Ra
 
 The framework is being developed by Raven Resonance, a small team building AR glasses for all-day wear. [Raven Glass v1](https://raven.computer/) hardware will be out soon and runs RavenOS, a Linux-based operating system. This repo contains a preview of Raven Framework and is the first part of the Raven SDK. We would love to hear your feedback in our [Discord community](https://raven.computer/s/discord)!
 
-
+`version = "1.0.0"`
 
 ## Table of Contents
 
@@ -22,6 +22,7 @@ The framework is being developed by Raven Resonance, a small team building AR gl
 - [Peripherals](#peripherals)
 - [Helpers](#helpers)
 - [Hardware Specifications](#hardware-specifications)
+- [Building Apps Without the Python Framework](#building-apps-without-the-python-framework)
 - [Designing for Raven OS](#designing-for-raven-os)
 - [Examples](#examples)
 - [Building Apps with AI](#building-apps-with-ai)
@@ -57,7 +58,6 @@ class MyApp(RavenApp):
     def __init__(self):
         super().__init__()
         self.app.add(button, x=0, y=10)
-        self.minimize()
 ```
 
 ### Run App
@@ -1130,6 +1130,14 @@ Raven Glass v1 hardware specifications:
 * **Power:** Raven Wings™ hot-swappable batteries
 * **Indicators:** Beakon™ lights
 * **Environmental Sensors:** Ambient light and proximity sensors
+
+## Building Apps Without the Python Framework
+
+Raven Glass runs Linux on 64-bit ARM (ARM64), so you can run (and deploy) essentially any ARM64 Linux program/runtime (Go, Rust, Node, C/C++, etc.)—you are not limited to this Python framework.
+
+The platform has a default runtime entrypoint at [`core/run.sh`](core/run.sh). By default it runs `python3 main.py` (or `python3 main.pyc` if present). If your app provides its own `run.sh`, that will override the default.
+
+Before choosing a stack, review the [Hardware Specifications](#hardware-specifications) and note the display is 720×720 (see [Designing for Raven OS](#designing-for-raven-os)).
 
 ## Designing for Raven OS
 
