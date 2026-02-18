@@ -654,8 +654,131 @@ class ModelRenderer(QOpenGLWidget):
         self.texture: Optional[int] = None
         self.material_groups: List[Dict[str, Any]] = []
         self.timer: Optional[QTimer] = None
+        self._load_mesh_data()
+
+    def _load_mesh_data(self) -> None:
+        """Load OBJ file, center/normalize, build interleaved vertex data. CPU-only; no OpenGL."""
+        file_path = self.obj_path
+        file_ext = os.path.splitext(file_path)[1].lower()
+
+        positions = None
+        material_groups_raw = None
+        indices = None
+        colors = None
+        texcoords = None
+        texture_path = None
+        is_obj_multi_material = False
+
+        try:
+            if file_ext == ".obj":
+                result = load_obj_mesh(file_path)
+                if isinstance(result[1], list):
+                    positions, material_groups_raw, colors, texcoords = result
+                    is_obj_multi_material = True
+                else:
+                    positions, indices, colors, texcoords, texture_path = result
+            else:
+                log.error(
+                    f"Unsupported file format: {file_ext}. Only .obj files are supported."
+                )
+                raise ValueError(
+                    f"Unsupported file format: {file_ext}. Only .obj files are supported."
+                )
+        except Exception as e:
+            log.error(f"Failed to load {file_path}: {e}", exc_info=True)
+            positions = np.array([[0, 0, 0]], dtype=np.float32)
+            indices = np.array([], dtype=np.uint32)
+            colors = None
+            texcoords = None
+            texture_path = None
+
+        if positions.ndim == 1:
+            positions = positions.reshape(-1, 3)
+
+        mins = positions.min(axis=0)
+        maxs = positions.max(axis=0)
+        center = (mins + maxs) / 2.0
+        scale = (maxs - mins).max()
+        if scale == 0:
+            scale = 1.0
+        positions = (positions - center) / scale * self.model_scale
+
+        num_vertices = len(positions)
+        if colors is None:
+            colors = (
+                np.ones((num_vertices, 3), dtype=np.float32) * DEFAULT_VERTEX_COLOR
+            )
+        else:
+            if colors.ndim == 1:
+                colors = colors.reshape(-1, 3)
+            if len(colors) != num_vertices:
+                colors = (
+                    np.ones((num_vertices, 3), dtype=np.float32) * DEFAULT_VERTEX_COLOR
+                )
+
+        if is_obj_multi_material and material_groups_raw:
+            # Ensure colors are (N, 3): one RGB triple per vertex (flat [r,g,b,r,g,b,...] -> rows)
+            if colors.ndim == 1:
+                colors = colors.reshape(-1, 3)
+            if len(colors) != num_vertices:
+                colors = np.ones((num_vertices, 3), dtype=np.float32)
+            if texcoords is None:
+                texcoords = np.zeros((num_vertices, 2), dtype=np.float32)
+            else:
+                if texcoords.ndim == 1:
+                    texcoords = texcoords.reshape(-1, 2)
+                if len(texcoords) != num_vertices:
+                    texcoords = np.zeros((num_vertices, 2), dtype=np.float32)
+
+            interleaved = np.hstack(
+                [
+                    positions.astype(np.float32),
+                    colors.astype(np.float32),
+                    texcoords.astype(np.float32),
+                ]
+            )
+            self._interleaved_flat = interleaved.ravel().astype(np.float32)
+            self._is_multi_material = True
+            index_offset = 0
+            self._material_groups_data = []
+            for mat_data in material_groups_raw:
+                self._material_groups_data.append({
+                    "indices": mat_data["indices"],
+                    "count": mat_data["count"],
+                    "texture_path": mat_data.get("texture_path"),
+                    "name": mat_data["name"],
+                    "index_offset": index_offset,
+                })
+                index_offset += mat_data["count"]
+        else:
+            has_texture = texcoords is not None and texture_path is not None
+            if texcoords is None:
+                texcoords = np.zeros((num_vertices, 2), dtype=np.float32)
+            else:
+                if texcoords.ndim == 1:
+                    texcoords = texcoords.reshape(-1, 2)
+                if len(texcoords) != num_vertices:
+                    texcoords = np.zeros((num_vertices, 2), dtype=np.float32)
+                    has_texture = False
+
+            interleaved = np.hstack(
+                [
+                    positions.astype(np.float32),
+                    colors.astype(np.float32),
+                    texcoords.astype(np.float32),
+                ]
+            )
+            self._interleaved_flat = interleaved.ravel().astype(np.float32)
+            self._is_multi_material = False
+            self._indices_uint32 = (
+                indices.astype(np.uint32) if indices is not None else np.array([], dtype=np.uint32)
+            )
+            self._index_count = len(self._indices_uint32)
+            self._texture_path = texture_path if has_texture else None
+            self._has_texture = has_texture and texture_path is not None
 
     def initializeGL(self) -> None:
+        """Upload preloaded mesh to VBO/IBO, load textures. Called once by Qt when widget is first shown."""
         glClearColor(DEFAULT_CLEAR_COLOR, DEFAULT_CLEAR_COLOR, DEFAULT_CLEAR_COLOR, 1.0)
         glEnable(GL_DEPTH_TEST)
 
@@ -679,97 +802,19 @@ class ModelRenderer(QOpenGLWidget):
         glLinkProgram(self.program)
         glUseProgram(self.program)
 
-        file_path = self.obj_path
-        file_ext = os.path.splitext(file_path)[1].lower()
+        # Upload preloaded vertex data to VBO
+        self.vbo = glGenBuffers(1)
+        glBindBuffer(GL_ARRAY_BUFFER, self.vbo)
+        glBufferData(
+            GL_ARRAY_BUFFER,
+            self._interleaved_flat.nbytes,
+            self._interleaved_flat.tobytes(),
+            GL_STATIC_DRAW,
+        )
 
-        positions = None
-        material_groups = None  # For OBJ with multiple materials
-        indices = None  # For single-material OBJ
-        colors = None
-        texcoords = None
-        texture_path = None
-        is_obj_multi_material = False
+        self.is_multi_material = self._is_multi_material
 
-        try:
-            if file_ext == ".obj":
-                result = load_obj_mesh(file_path)
-                if isinstance(result[1], list):  # Multiple materials
-                    positions, material_groups, colors, texcoords = result
-                    is_obj_multi_material = True
-                else:
-                    # Fallback to old format
-                    positions, indices, colors, texcoords, texture_path = result
-            else:
-                log.error(
-                    f"Unsupported file format: {file_ext}. Only .obj files are supported."
-                )
-                raise ValueError(
-                    f"Unsupported file format: {file_ext}. Only .obj files are supported."
-                )
-        except Exception as e:
-            log.error(f"Failed to load {file_path}: {e}", exc_info=True)
-            positions = np.array([[0, 0, 0]], dtype=np.float32)
-            indices = np.array([], dtype=np.uint32)
-            colors = None
-            texcoords = None
-            texture_path = None
-
-        if positions.ndim == 1:
-            positions = positions.reshape(-1, 3)
-
-        # center + normalize to fit approx unit cube
-        mins = positions.min(axis=0)
-        maxs = positions.max(axis=0)
-        center = (mins + maxs) / 2.0
-        scale = (maxs - mins).max()
-        if scale == 0:
-            scale = 1.0
-        positions = (positions - center) / scale * self.model_scale
-
-        num_vertices = len(positions)
-        if colors is None:
-            # Default to white color for all vertices
-            colors = (
-                np.ones((num_vertices, 3), dtype=np.float32) * DEFAULT_VERTEX_COLOR
-            )  # Light gray/white
-        else:
-            if colors.ndim == 1:
-                colors = colors.reshape(-1, 3)
-            if len(colors) != num_vertices:
-                # If mismatch, use default color
-                colors = (
-                    np.ones((num_vertices, 3), dtype=np.float32) * DEFAULT_VERTEX_COLOR
-                )
-
-        # Handle OBJ with multiple materials
-        if is_obj_multi_material and material_groups:
-            if colors is None:
-                colors = np.ones(
-                    (num_vertices, 3), dtype=np.float32
-                )  # Fallback to white
-            else:
-                if colors.ndim == 1:
-                    colors = colors.reshape(-1, 3)
-                if len(colors) != num_vertices:
-                    log.warning(
-                        f"Color count mismatch! Expected {num_vertices}, got {len(colors)}"
-                    )
-                    colors = np.ones((num_vertices, 3), dtype=np.float32)
-            if len(colors) > 0:
-                log.debug(f"Sample vertex colors (first 3): {colors[:3]}")
-                log.debug(
-                    f"Color range: min={colors.min():.3f}, max={colors.max():.3f}"
-                )
-
-            if texcoords is None:
-                texcoords = np.zeros((num_vertices, 2), dtype=np.float32)
-            else:
-                if texcoords.ndim == 1:
-                    texcoords = texcoords.reshape(-1, 2)
-                if len(texcoords) != num_vertices:
-                    texcoords = np.zeros((num_vertices, 2), dtype=np.float32)
-
-            # Create a default white 1x1 texture for materials without textures
+        if self._is_multi_material:
             default_texture = glGenTextures(1)
             glBindTexture(GL_TEXTURE_2D, default_texture)
             white_pixel = np.array([255, 255, 255, 255], dtype=np.uint8).reshape(
@@ -792,9 +837,22 @@ class ModelRenderer(QOpenGLWidget):
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT)
             glBindTexture(GL_TEXTURE_2D, 0)
 
+            all_indices = []
+            for mat in self._material_groups_data:
+                all_indices.extend(mat["indices"].tolist())
+            all_indices_array = np.array(all_indices, dtype=np.uint32)
+            self.ibo = glGenBuffers(1)
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.ibo)
+            glBufferData(
+                GL_ELEMENT_ARRAY_BUFFER,
+                all_indices_array.nbytes,
+                all_indices_array.tobytes(),
+                GL_STATIC_DRAW,
+            )
+
             self.material_groups = []
-            for mat_data in material_groups:
-                texture = default_texture  # Default to white texture
+            for mat_data in self._material_groups_data:
+                texture = default_texture
                 has_texture = False
                 if mat_data["texture_path"]:
                     log.debug(
@@ -813,7 +871,6 @@ class ModelRenderer(QOpenGLWidget):
                     log.debug(
                         f"Material '{mat_data['name']}' has no texture_path, using default"
                     )
-
                 self.material_groups.append(
                     {
                         "indices": mat_data["indices"],
@@ -821,85 +878,25 @@ class ModelRenderer(QOpenGLWidget):
                         "texture": texture,
                         "has_texture": has_texture,
                         "name": mat_data["name"],
+                        "index_offset": mat_data["index_offset"],
                     }
                 )
-
-            interleaved = np.hstack(
-                [
-                    positions.astype(np.float32),
-                    colors.astype(np.float32),
-                    texcoords.astype(np.float32),
-                ]
-            )
-            interleaved_flat = interleaved.ravel().astype(np.float32)
-            self.is_multi_material = True
         else:
-            has_texture = texcoords is not None and texture_path is not None
-            if texcoords is None:
-                texcoords = np.zeros((num_vertices, 2), dtype=np.float32)
-            else:
-                if texcoords.ndim == 1:
-                    texcoords = texcoords.reshape(-1, 2)
-                if len(texcoords) != num_vertices:
-                    texcoords = np.zeros((num_vertices, 2), dtype=np.float32)
-                    has_texture = False
-
+            self.ibo = glGenBuffers(1)
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.ibo)
+            glBufferData(
+                GL_ELEMENT_ARRAY_BUFFER,
+                self._indices_uint32.nbytes,
+                self._indices_uint32.tobytes(),
+                GL_STATIC_DRAW,
+            )
+            self.index_count = self._index_count
             self.texture = None
-            if has_texture and texture_path:
-                self.texture = load_texture(texture_path)
-                if self.texture is None:
-                    has_texture = False
-
-            interleaved = np.hstack(
-                [
-                    positions.astype(np.float32),
-                    colors.astype(np.float32),
-                    texcoords.astype(np.float32),
-                ]
-            )
-            interleaved_flat = interleaved.ravel().astype(np.float32)
-            self.has_texture = has_texture
-            self.is_multi_material = False
-            indices_uint32 = indices.astype(np.uint32)
-            self.index_count = len(indices_uint32)
-
-        # Upload VBO
-        self.vbo = glGenBuffers(1)
-        glBindBuffer(GL_ARRAY_BUFFER, self.vbo)
-        glBufferData(
-            GL_ARRAY_BUFFER,
-            interleaved_flat.nbytes,
-            interleaved_flat.tobytes(),
-            GL_STATIC_DRAW,
-        )
-
-        # Upload IBO
-        if is_obj_multi_material:
-            all_indices = []
-            index_offset = 0
-            for mat_group in self.material_groups:
-                mat_group["index_offset"] = index_offset
-                all_indices.extend(mat_group["indices"].tolist())
-                index_offset += len(mat_group["indices"])
-            all_indices_array = np.array(all_indices, dtype=np.uint32)
-            self.ibo = glGenBuffers(1)
-            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.ibo)
-            glBufferData(
-                GL_ELEMENT_ARRAY_BUFFER,
-                all_indices_array.nbytes,
-                all_indices_array.tobytes(),
-                GL_STATIC_DRAW,
-            )
-        else:
-            # Single material
-            self.ibo = glGenBuffers(1)
-            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.ibo)
-            glBufferData(
-                GL_ELEMENT_ARRAY_BUFFER,
-                indices_uint32.nbytes,
-                indices_uint32.tobytes(),
-                GL_STATIC_DRAW,
-            )
+            self.has_texture = False
+            if self._texture_path:
+                self.texture = load_texture(self._texture_path)
+                if self.texture is not None:
+                    self.has_texture = True
 
         # attribute locations
         if not IS_RAVEN_DEVICE:

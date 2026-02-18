@@ -52,14 +52,14 @@ class Palette:
 @dataclass(frozen=True)
 class FontSizes:
     """
-    Generic font size palette with common font size tokens.
+    Generic font size palette with common font size tokens (in pixels).
 
     Args:
-        display (int): Display font size in points. Defaults to 45.
-        title (int): Title font size in points. Defaults to 38.
-        headline (int): Headline font size in points. Defaults to 33.
-        body (int): Body font size in points. Defaults to 28.
-        small (int): Small font size in points. Defaults to 18.
+        display (int): Display font size in pixels. Defaults to 45.
+        title (int): Title font size in pixels. Defaults to 38.
+        headline (int): Headline font size in pixels. Defaults to 33.
+        body (int): Body font size in pixels. Defaults to 28.
+        small (int): Small font size in pixels. Defaults to 18.
     """
 
     display: int

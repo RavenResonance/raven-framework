@@ -13,142 +13,23 @@
 """
 Font utilities for Raven Framework.
 
-This module provides font loading, device detection, and scaling functionality
-for consistent typography across different platforms and devices.
+Font loading and creation with pixel-based sizes (no DPI or device scaling).
 """
 
-import json
 import os
-import platform
-from enum import Enum
-from pathlib import Path
 from typing import Dict
 
 from PySide6.QtGui import QFont, QFontDatabase
-from PySide6.QtWidgets import QApplication
 
 from .logger import get_logger
 
 log = get_logger("FontUtils")
-
-
-def load_config() -> dict:
-    """
-    Load configuration from config.json file.
-
-    Returns:
-        dict: Configuration dictionary loaded from config.json.
-    """
-    config_path = Path(__file__).parent.parent / "config.json"
-    with open(config_path, "r") as f:
-        return json.load(f)
-
-
-# Load configuration
-_config = load_config()
-STANDARD_DPI = _config["display"]["STANDARD_DPI"]
 
 _loaded_fonts: Dict[str, bool] = {}
 
 _font_family_names: Dict[str, str] = {}
 
 _font_cache: Dict[tuple, QFont] = {}
-
-
-class DeviceType(str, Enum):
-    """Device type enumeration for font scaling."""
-
-    DARWIN = "darwin"
-    LINUX = "linux"
-    WINDOWS = "windows"
-    DEFAULT = "default"
-
-
-# Device-specific font scaling factors, to be updated based on the actual display size and DPI
-_device_font_scales = {
-    DeviceType.DARWIN: 1.0,  # Darwin/macOS (reference)
-    DeviceType.LINUX: 0.8,  # Linux (scale down for consistent appearance)
-    DeviceType.WINDOWS: 1.0,  # Windows
-    DeviceType.DEFAULT: 1.0,
-}
-
-
-def detect_device_type() -> DeviceType:
-    """
-    Detect the current device type for font scaling.
-
-    Returns:
-        DeviceType: Device type enum value
-    """
-    try:
-        system = platform.system().lower()
-        system_to_device = {
-            "linux": DeviceType.LINUX,
-            "darwin": DeviceType.DARWIN,
-            "windows": DeviceType.WINDOWS,
-        }
-        return system_to_device.get(system, DeviceType.DEFAULT)
-
-    except Exception as e:
-        log.warning(f"Error detecting device type: {e}, using default")
-        return DeviceType.DEFAULT
-
-
-def get_device_font_scale() -> float:
-    """
-    Get the font scaling factor for the current device.
-
-    Returns:
-        float: Font scaling factor (1.0 = no scaling)
-    """
-    device_type = detect_device_type()
-    scale = _device_font_scales.get(
-        device_type, _device_font_scales[DeviceType.DEFAULT]
-    )
-    return scale
-
-
-def get_dpi_scale() -> float:
-    """
-    Get DPI-based scaling factor from Qt.
-
-    Returns:
-        float: DPI scaling factor
-    """
-    try:
-        if QApplication.instance() is not None:
-            screen = QApplication.primaryScreen()
-            if screen:
-                dpi = screen.logicalDotsPerInch()
-                if dpi == 0:
-                    error_msg = "Division by zero: dpi is 0, cannot calculate DPI scale"
-                    log.error(error_msg, extra={"console": True})
-                    raise ValueError(error_msg)
-                return dpi / STANDARD_DPI
-    except Exception as e:
-        log.warning(f"Error getting DPI scale: {e}")
-
-    return 1.0
-
-
-def get_combined_font_scale() -> float:
-    """
-    Get the combined scaling factor (device + DPI).
-    On Mac, only use device scaling to maintain reference appearance.
-
-    Returns:
-        float: Combined font scaling factor
-    """
-    device_scale = get_device_font_scale()
-    device_type = detect_device_type()
-
-    if device_type == DeviceType.DARWIN:
-        combined_scale = device_scale
-    else:
-        dpi_scale = get_dpi_scale()
-        combined_scale = device_scale * dpi_scale
-
-    return combined_scale
 
 
 def load_font_family(font_name: str) -> bool:
@@ -308,43 +189,6 @@ def get_font_family_name(font_name: str) -> str:
         return get_system_default_font_family()
 
 
-def set_device_font_scale(device_type: DeviceType, scale: float) -> None:
-    """
-    Override the font scaling factor for a specific device type.
-
-    Args:
-        device_type (DeviceType): Device type enum value
-        scale (float): Font scaling factor
-    """
-    if device_type in _device_font_scales:
-        _device_font_scales[device_type] = scale
-        log.info(f"Set font scale for {device_type.value} to {scale}")
-    else:
-        log.warning(f"Unknown device type: {device_type}")
-
-
-def get_current_device_info() -> dict:
-    """
-    Get information about the current device and scaling factors.
-
-    Returns:
-        dict: Device information including type, scales, and DPI
-    """
-    device_type = detect_device_type()
-    device_scale = get_device_font_scale()
-    dpi_scale = get_dpi_scale()
-    combined_scale = get_combined_font_scale()
-
-    return {
-        "device_type": device_type.value,
-        "device_scale": device_scale,
-        "dpi_scale": dpi_scale,
-        "combined_scale": combined_scale,
-        "platform": platform.system(),
-        "machine": platform.machine(),
-    }
-
-
 def preload_fonts() -> None:
     """
     Preload all available fonts to avoid loading during paint events.
@@ -356,27 +200,21 @@ def preload_fonts() -> None:
 
 def create_font(font: str, font_size: int, font_weight: str = "normal") -> QFont:
     """
-    Create a QFont object with the specified font family, size, and weight.
-    Automatically applies device-specific scaling for consistent appearance across platforms.
+    Create a QFont with the given family, pixel size, and weight.
+    Size is in pixels; no DPI or device scaling is applied so 28 means 28px.
 
     Args:
         font (str): Font family name ('libre_franklin', 'inter').
-        font_size (int): Font size in points (will be scaled for device).
+        font_size (int): Font size in pixels.
         font_weight (str): Font weight ('light', 'normal', 'medium', 'bold', 'black').
 
     Returns:
-        QFont: Configured QFont object with device-appropriate scaling.
+        QFont: Configured QFont with the requested pixel size.
     """
-    # Apply device-specific scaling
-    scale_factor = get_combined_font_scale()
-    scaled_font_size = int(font_size * scale_factor)
-
-    # Check cache first (use scaled size for cache key)
-    cache_key = (font, scaled_font_size, font_weight)
+    cache_key = (font, font_size, font_weight)
     if cache_key in _font_cache:
         return _font_cache[cache_key]
 
-    # Validate font
     valid_fonts = ["libre_franklin", "inter"]
     if font not in valid_fonts:
         log.warning(
@@ -384,7 +222,6 @@ def create_font(font: str, font_size: int, font_weight: str = "normal") -> QFont
         )
         font_family_name = get_system_default_font_family()
     else:
-        # Load the specified font family
         font_loaded = load_font_family(font)
         if not font_loaded:
             log.warning(
@@ -394,7 +231,6 @@ def create_font(font: str, font_size: int, font_weight: str = "normal") -> QFont
         else:
             font_family_name = get_font_family_name(font)
 
-    # Map font weight strings to QFont constants
     weight_map = {
         "light": QFont.Light,
         "normal": QFont.Normal,
@@ -404,25 +240,17 @@ def create_font(font: str, font_size: int, font_weight: str = "normal") -> QFont
     }
     weight_value = weight_map.get(font_weight.lower(), QFont.Normal)
 
-    # Create font with the scaled size
-    font_obj = QFont(font_family_name, scaled_font_size, weight_value)
+    font_obj = QFont(font_family_name)
+    font_obj.setPixelSize(font_size)
+    font_obj.setWeight(weight_value)
 
-    # Cache the font object
     _font_cache[cache_key] = font_obj
     return font_obj
 
 
-# Export the new functions for external use
 __all__ = [
-    "DeviceType",
     "load_font_family",
     "get_font_family_name",
     "create_font",
     "preload_fonts",
-    "detect_device_type",
-    "get_device_font_scale",
-    "get_dpi_scale",
-    "get_combined_font_scale",
-    "set_device_font_scale",
-    "get_current_device_info",
 ]
