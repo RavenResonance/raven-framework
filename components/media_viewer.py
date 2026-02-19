@@ -19,8 +19,12 @@ rounded corners, auto-scaling, and playback controls.
 
 import json
 import os
+import re
+import tempfile
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 import cv2
 import numpy as np
@@ -39,6 +43,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
+from ..helpers.async_runner import AsyncRunner
 from ..helpers.logger import get_logger
 from ..helpers.themes import RAVEN_CORE
 from ..helpers.utils_light import load_config
@@ -54,6 +59,8 @@ _config = load_config()
 # Calculate interval from FPS: 1000ms / fps
 DEFAULT_VIDEO_INTERVAL_MS = int(1000 / _config["fps"]["UI_FPS"])
 DEFAULT_MOVIE_SPEED = 100  # Percentage: 100 = normal speed
+DOWNLOAD_CHUNK_SIZE = 256 * 1024  # 256 KB for streaming URL downloads
+HTTP_USER_AGENT = _config["http"]["USER_AGENT"]
 
 
 class MediaViewer(QWidget):
@@ -97,6 +104,21 @@ class MediaViewer(QWidget):
             log.error(f"Invalid width/height/corner_radius: {e}")
             raise
 
+        requested_w, requested_h = width, height
+        width = max(4, round(width / 4) * 4)
+        height = max(4, round(height / 4) * 4)
+        if requested_w != width or requested_h != height:
+            msg = f"""
+            ================ MediaViewer Size Requirement ================
+                    MediaViewer width and height must be a multiple
+                    of 4. Requested {requested_w}x{requested_h} has been
+                    adjusted to {width}x{height}. Use multiples of 4 
+                    (e.g. 384, 388, 400) to avoid video corruption 
+                    and this warning.
+            ================================================================
+            """
+            log.warning(msg, extra={"console": True})
+
         self.setFixedSize(width, height)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
@@ -117,6 +139,9 @@ class MediaViewer(QWidget):
         self.cap = None
         self.timer = None
         self.pixmap_provided = pixmap_provided
+        self._async_runner = AsyncRunner()
+        self._load_request_id = 0
+        self._temp_download_path: Optional[str] = None
         if pixmap_provided:
             scaled_pixmap = self.scaled_pixmap_cover(
                 pixmap_provided, self.media_widget.width(), self.media_widget.height()
@@ -125,20 +150,180 @@ class MediaViewer(QWidget):
         elif media_path:
             self.load_media(media_path)
 
+    def _is_http_url(self, value: str) -> bool:
+        """
+        Returns True if value looks like an http(s) URL.
+
+        Note: We intentionally keep this conservative to avoid misclassifying local paths.
+        """
+        if not value or not isinstance(value, str):
+            return False
+        return re.match(r"^https?://", value.strip(), flags=re.IGNORECASE) is not None
+
+    def _cleanup_temp_download(self) -> None:
+        """
+        Remove any temp file created for URL media.
+        """
+        try:
+            if self._temp_download_path and os.path.exists(self._temp_download_path):
+                os.remove(self._temp_download_path)
+        except Exception as e:
+            log.warning(f"Failed to delete temp media file: {e}", exc_info=True)
+        finally:
+            self._temp_download_path = None
+
+    def _download_url_to_tempfile(self, url: str, *, suffix: str) -> str:
+        """
+        Download a URL to a local temporary file and return the file path.
+        """
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+        tmp_path = tmp.name
+        try:
+            # Prefer requests if installed (used elsewhere in this repo), fall back to urllib.
+            try:
+                import requests  # type: ignore
+
+                headers = {"User-Agent": HTTP_USER_AGENT}
+                with requests.get(
+                    url, headers=headers, timeout=15, allow_redirects=True, stream=True
+                ) as res:
+                    res.raise_for_status()
+                    for chunk in res.iter_content(chunk_size=DOWNLOAD_CHUNK_SIZE):
+                        if chunk:
+                            tmp.write(chunk)
+            except Exception:
+                headers = {"User-Agent": HTTP_USER_AGENT}
+                req = Request(url, headers=headers)
+                with urlopen(req, timeout=15) as resp:  # nosec - user-provided URL
+                    while True:
+                        chunk = resp.read(DOWNLOAD_CHUNK_SIZE)
+                        if not chunk:
+                            break
+                        tmp.write(chunk)
+
+            tmp.flush()
+            return tmp_path
+        except Exception:
+            # Ensure temp file isn't leaked on failure.
+            try:
+                tmp.close()
+            finally:
+                try:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+                except Exception:
+                    pass
+            raise
+        finally:
+            try:
+                tmp.close()
+            except Exception:
+                pass
+
+    def _load_media_from_url(self, url: str) -> None:
+        """
+        Download URL media in a background thread then load it as a local file.
+        """
+        url = (url or "").strip()
+        if not url:
+            return
+
+        # New request; invalidate any in-flight callbacks.
+        self._load_request_id += 1
+        request_id = self._load_request_id
+
+        # Clear any previous download outcome to avoid stale state.
+        self._download_result_path = None  # type: ignore[attr-defined]
+        self._download_error = None  # type: ignore[attr-defined]
+
+        # Clean up existing state first.
+        try:
+            self.cleanup_video_resources()
+            self.cleanup_gif_resources()
+        except Exception as e:
+            log.error(f"Error stopping previous media playback: {e}", exc_info=True)
+        self._cleanup_temp_download()
+
+        # Lightweight UI hint while downloading.
+        self.is_video = False
+        self.media_widget.clear()
+        self.media_widget.setText("Loading…")
+
+        parsed = urlparse(url)
+        ext = os.path.splitext(parsed.path)[1].lower()
+        # If URL has no extension, still download; try to treat as image by default.
+        suffix = ext if ext else ".bin"
+
+        def run_download() -> None:
+            try:
+                tmp_path = self._download_url_to_tempfile(url, suffix=suffix)
+                # Stash result for callback on main thread.
+                self._download_result_path = tmp_path  # type: ignore[attr-defined]
+            except Exception as e:
+                self._download_error = e  # type: ignore[attr-defined]
+
+        def on_complete() -> None:
+            # If a newer request started since this one, discard.
+            if request_id != self._load_request_id:
+                tmp_path = getattr(self, "_download_result_path", None)
+                if isinstance(tmp_path, str) and os.path.exists(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except Exception:
+                        pass
+                return
+
+            err = getattr(self, "_download_error", None)
+            if err is not None:
+                log.error(f"Failed to download media URL: {url}. Error: {err}")
+                self.media_widget.setText("Failed to load media")
+                return
+
+            tmp_path = getattr(self, "_download_result_path", None)
+            if not isinstance(tmp_path, str) or not os.path.exists(tmp_path):
+                log.error("Download completed but temp file is missing.")
+                self.media_widget.setText("Failed to load media")
+                return
+
+            # Keep temp file around for resizeEvent reloads / video playback.
+            self._temp_download_path = tmp_path
+            self.media_path = tmp_path
+            # Load as a local file path.
+            self.load_media(tmp_path)
+
+        self._async_runner.run(run_download, on_complete=on_complete)
+
     def load_media(self, path: str) -> None:
         """
-        Load and display the media from the given path.
+        Load and display media from a local path or a web URL.
 
-        Supports images (.jpg, .jpeg, .png, .bmp, .webp), GIFs (.gif),
-        and videos (.mp4, .avi, .mov, .mkv).
+        Supported inputs:
+        - Local filesystem paths to images (.jpg, .jpeg, .png, .bmp, .webp), GIFs (.gif),
+          and videos (.mp4, .avi, .mov, .mkv)
+        - http(s) URLs pointing to those file types
+
+        For URLs, the media is downloaded asynchronously to a temporary file and then loaded
+        using the same local-file code paths. The temporary file is cleaned up when new media
+        is loaded (or when the widget is closed).
 
         Args:
-            path (str): Path to image, GIF, or video file.
-
-        Raises:
-            FileNotFoundError: If the media file does not exist (handled internally).
+            path (str): Local path or http(s) URL to image, GIF, or video media.
         """
         log.info(f"Loading media: {path}")
+
+        if self._is_http_url(path):
+            self._load_media_from_url(path)
+            return
+
+        # If we previously downloaded URL media, drop it when switching to a different local path.
+        try:
+            if self._temp_download_path and os.path.abspath(path) != os.path.abspath(
+                self._temp_download_path
+            ):
+                self._cleanup_temp_download()
+        except Exception:
+            log.warning("Error cleaning up previous media download", exc_info=True)
+            pass
 
         if not os.path.exists(path):
             log.error(f"File not found: {path}")
@@ -350,6 +535,7 @@ class MediaViewer(QWidget):
             log.info("MediaViewer closing - cleaning up resources")
             self.cleanup_video_resources()
             self.cleanup_gif_resources()
+            self._cleanup_temp_download()
 
             # Clear the media widget
             if self.media_widget:

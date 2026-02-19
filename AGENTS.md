@@ -309,6 +309,9 @@ from raven_framework.components.media_viewer import MediaViewer
 # Image
 viewer = MediaViewer(media_path="assets/image.jpg")
 
+# Image (URL)
+viewer = MediaViewer(media_path="https://example.com/image.jpg")
+
 # GIF
 viewer = MediaViewer(media_path="assets/animation.gif")
 
@@ -318,9 +321,11 @@ viewer.play_video()
 viewer.pause_video()
 ```
 
-**Key params:** `media_path`, `corner_radius`, `width`, `height`, `loop_video`
+**Key params:** `media_path` (local path or http(s) URL), `corner_radius`, `width`, `height`, `loop_video`
 
 **Key methods:** `play_video()`, `pause_video()`
+
+**Note:** `width` and `height` must be multiples of 4 (QImage row stride requirement). If you pass other values (e.g. 385×385), the viewer will adjust them to the nearest multiple of 4 (e.g. 384×384) and log a warning. Use sizes like 384, 388, or 400 to avoid video corruption and the warning.
 
 #### WebViewer
 
@@ -750,8 +755,8 @@ Raven Glass is designed for **comfort, presence, and real-world awareness**. The
 - Light from display adds to real-world light
 - **Black appears transparent** - pure black cannot be displayed (though can be used for occlusion/depth)
 - White text/UI elements work well against dark backgrounds
-- Bright, saturated colors may bloom
-- Use accent colors sparingly
+- White and saturated colors provide the strongest contrast against real world backgrounds
+- Apply accent colors sparingly to preserve contrast and readability
 - Never rely on color alone for meaning
 - All color appearance depends on ambient lighting, display brightness, and waveguide properties
 

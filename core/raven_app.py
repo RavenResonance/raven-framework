@@ -104,7 +104,7 @@ class RavenApp(Container):
         # Setup icons
         here = os.path.dirname(__file__)
         home_icon_path = os.path.join(
-            here, "..", _config["asset_paths"]["HOME_ICON_PATH"]
+            here, "..", _config["asset_paths"]["APPS_ICON_PATH"]
         )
 
         self.close_icon = Icon(is_square=False, background_image_path=home_icon_path)

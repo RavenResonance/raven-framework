@@ -9,7 +9,8 @@ A comprehensive UI framework and API for building gaze-based applications for Ra
 
 The framework is being developed by Raven Resonance, a small team building AR glasses for all-day wear. [Raven Glass v1](https://raven.computer/) hardware will be out soon and runs RavenOS, a Linux-based operating system. This repo contains a preview of Raven Framework and is the first part of the Raven SDK. We would love to hear your feedback in our [Discord community](https://raven.computer/s/discord)!
 
-`version = "1.0.0"`
+`version = "1.0.1"`
+
 
 ## Table of Contents
 
@@ -511,6 +512,7 @@ viewer.pause_video()
 
 **Frequently used methods:** `play_video()`, `pause_video()`
 
+**Note:** `width` and `height` must be multiples of 4. If you pass other values (e.g. 385×385), the viewer will adjust them to the nearest multiple of 4 (e.g. 384×384) and log a warning.
 See detailed params and functions in `raven_framework/components/media_viewer.py`
 
 #### Web Viewer
@@ -1172,9 +1174,9 @@ The right‑side offset reduces distraction, preserves central vision, and impro
 Raven uses a **waveguide-based additive display**. Additive blending means that light from the display is added to the light from the real world. The waveguide projects light into the user's eye, which combines with ambient light from the environment.  This means:
 
 * Light from the display adds to real-world light (additive blending)
-* Bright, saturated colors may bloom or appear more intense than on traditional displays
+* White and saturated colors provide the strongest contrast against real world backgrounds
 * Dark backgrounds with white or light gray text provide better contrast and readability
-* Use accent colors sparingly to avoid visual fatigue
+* Apply accent colors sparingly to preserve contrast and readability
 * Never rely on color alone for meaning
 * Black gets completely vanished no matter what — pure black cannot be displayed on an additive display
   * Though you can use it for occlusion and showing depth. For example, the background of buttons by default is black so it occludes the content behind it

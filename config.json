@@ -5,7 +5,9 @@
   },
   "fps": {
     "UI_FPS": 30,
-    "SIMULATOR_FPS": 30
+    "SIMULATOR_FPS": 30,
+    "CAST_FPS_RAVEN_DEVICE": 15,
+    "CAST_FPS_NON_RAVEN_DEVICE": 30
   },
   "deployment": {
     "BASE_API_URL": "https://v1.apps.s.raven.computer/",
@@ -22,9 +24,13 @@
     "QT_DEGREES_TO_UNITS": 16,
     "STANDARD_DPI": 96.0
   },
+  "http": {
+    "USER_AGENT": "Mozilla/5.0 (compatible; RavenOS/1.0; +https://raven.computer/)"
+  },
   "asset_paths": {
     "AUDIO_CLICK_PATH": "audio/raven_click.wav",
     "HOME_ICON_PATH": "assets/icons/home.png",
+    "APPS_ICON_PATH": "assets/icons/apps.png",
     "ACTION_BUTTON_ICON_PATH": "assets/icons/action_button.png"
   },
   "simulator": {

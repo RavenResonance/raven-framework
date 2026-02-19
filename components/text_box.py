@@ -44,7 +44,7 @@ class TextBox(QLabel):
                                   Defaults to None (uses body font as default).
         text_color (str): CSS color string or QColor-compatible color for text. Defaults to theme.fonts.body.color.
         font (str): Font family ('libre_franklin'). Defaults to theme.fonts.body.family.
-        font_size (int): Font size in points. Defaults to theme.fonts.body.size.
+        font_size (int): Font size in pixels. Defaults to theme.fonts.body.size.
         font_weight (str): Font weight, one of 'light', 'normal', 'medium', 'bold', or 'black'. Defaults to theme.fonts.body.weight.
         alignment (str): Text alignment, one of 'left', 'center', or 'right'. Defaults to 'left'.
         wrap_words (bool): Whether to enable word wrapping. Defaults to True.

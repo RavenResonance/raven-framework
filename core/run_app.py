@@ -61,6 +61,8 @@ BASE_API_URL = _config["deployment"]["BASE_API_URL"]
 ACCEPTING_DEPLOYMENTS = _config["deployment"].get("ACCEPTING_DEPLOYMENTS", True)
 OVERLAY_FRAME_RATE = _config["fps"]["SIMULATOR_FPS"]
 BACKGROUND_VIDEO_FRAME_RATE = _config["fps"]["SIMULATOR_FPS"]
+CAST_FRAME_RATE_RAVEN_DEVICE = _config["fps"].get("CAST_FPS_RAVEN_DEVICE")
+CAST_FRAME_RATE_NON_RAVEN_DEVICE = _config["fps"].get("CAST_FPS_NON_RAVEN_DEVICE")
 DISPLAY_RESOLUTION = tuple(_config["resolution"]["DISPLAY_RESOLUTION"])
 APP_RESOLUTION = tuple(_config["resolution"]["APP_RESOLUTION"])
 APP_WINDOW_RESOLUTION = (DISPLAY_RESOLUTION[0], DISPLAY_RESOLUTION[1] + 60)
@@ -936,6 +938,13 @@ class RunApp(QMainWindow):
                 raise ValueError(error_msg)
 
             log.info("RAVEN APP READY LAUNCH SIGNAL", extra={"console": True})
+            if is_raven_device():
+                try:
+                    from ..socket_managers.app_launch import send_app_launched
+                    send_app_launched(app_id=app_id, pid=os.getpid())
+                except Exception as e:
+                    log.warning(f"Failed to notify launcher that app launched: {e}")
+                    pass
 
             # Create window with error handling
             try:
@@ -1000,21 +1009,16 @@ class RunApp(QMainWindow):
 
                 snapshot_thread_active = False
 
-                def save_snapshot_in_background(pixmap: QPixmap, path: str):
-                    """Save the pixmap to disk in a background thread."""
+                def save_snapshot_in_background(image: QImage, path: str):
+                    """Save image to disk in background (keeps main thread light)."""
                     nonlocal snapshot_thread_active
                     try:
-                        # Convert pixmap to image for thread-safe saving
-                        image = pixmap.toImage()
-                        # Write to temporary file first, then atomically rename
-                        # Prevent race conditions when OverlayWidget reads the file
+                        image = image.copy()  # copy in worker so main thread does less
                         temp_path = path + ".tmp"
                         image.save(temp_path, "PNG")
-                        # Atomic rename to prevent reading partial files
                         os.replace(temp_path, path)
                     except Exception as e:
                         log.error(f"Failed to save widget snapshot: {e}")
-                        # Clean up temp file if it exists
                         temp_path = path + ".tmp"
                         if os.path.exists(temp_path):
                             try:
@@ -1025,38 +1029,34 @@ class RunApp(QMainWindow):
                         snapshot_thread_active = False
 
                 def capture_widget_snapshot():
-                    """Capture the widget and queue it for background saving."""
+                    """Grab once on main thread, copy to QImage, then do all heavy work in background."""
                     nonlocal snapshot_thread_active
                     try:
-                        # grab() must be called on main thread
-                        pixmap = app_widget.grab()
-
-                        # Skip this frame if previous save is still in progress
                         if snapshot_thread_active:
                             return
-
-                        # Start save operation in background thread
+                        # Main thread: only grab + active check; copy done in worker
+                        pixmap = app_widget.grab()
+                        image = pixmap.toImage()
                         snapshot_thread_active = True
-                        thread = threading.Thread(
+                        threading.Thread(
                             target=save_snapshot_in_background,
-                            args=(pixmap, snapshot_path),
+                            args=(image, snapshot_path),
                             daemon=True,
-                        )
-                        thread.start()
-
+                        ).start()
                     except Exception as e:
                         log.error(f"Failed to capture widget snapshot: {e}")
                         snapshot_thread_active = False
 
                 snapshot_timer = QTimer()
                 snapshot_timer.timeout.connect(capture_widget_snapshot)
-                if OVERLAY_FRAME_RATE <= 0:
+                cast_fps = CAST_FRAME_RATE_NON_RAVEN_DEVICE
+                if cast_fps <= 0:
                     error_msg = (
-                        f"OVERLAY_FRAME_RATE must be positive, got {OVERLAY_FRAME_RATE}"
+                        f"CAST_FRAME_RATE_NON_RAVEN_DEVICE must be positive, got {cast_fps}"
                     )
                     log.error(error_msg, extra={"console": True})
                     raise ValueError(error_msg)
-                timer_interval = int(1000 / OVERLAY_FRAME_RATE)
+                timer_interval = int(1000 / cast_fps)
                 snapshot_timer.start(timer_interval)
                 capture_widget_snapshot()
                 log.info(f"Widget snapshot capture enabled (every {timer_interval}ms)")
@@ -1397,6 +1397,7 @@ class RunApp(QMainWindow):
             ".json",
             ".txt",
             ".md",
+            ".sh",
         ]
 
         assets_copied = 0
