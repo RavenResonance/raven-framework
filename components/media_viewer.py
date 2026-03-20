@@ -10,6 +10,8 @@
 #
 # ================================================================
 
+from __future__ import annotations
+
 """
 Media viewer widget for Raven Framework.
 
@@ -17,18 +19,15 @@ This module provides a widget for displaying images, GIFs, and videos with
 rounded corners, auto-scaling, and playback controls.
 """
 
-import json
 import os
 import re
 import tempfile
-from pathlib import Path
-from typing import Optional
-from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from typing import TYPE_CHECKING, Optional
 
-import cv2
-import numpy as np
-from PySide6.QtCore import QRectF, Qt, QTimer
+if TYPE_CHECKING:
+    import numpy as np
+
+from PySide6.QtCore import QRectF, QSize, Qt, QTimer
 from PySide6.QtGui import (
     QCloseEvent,
     QColor,
@@ -48,8 +47,11 @@ from ..helpers.logger import get_logger
 from ..helpers.themes import RAVEN_CORE
 from ..helpers.utils_light import load_config
 
-theme = RAVEN_CORE
+_QT_FORMAT_BGR = getattr(QImage, "Format_BGR888", None) or getattr(
+    getattr(QImage, "Format", None), "Format_BGR888", None
+)
 
+theme = RAVEN_CORE
 log = get_logger("MediaViewer")
 
 # Load configuration
@@ -58,9 +60,10 @@ _config = load_config()
 # Constants
 # Calculate interval from FPS: 1000ms / fps
 DEFAULT_VIDEO_INTERVAL_MS = int(1000 / _config["fps"]["UI_FPS"])
+HTTP_USER_AGENT = _config["http"]["USER_AGENT"]
 DEFAULT_MOVIE_SPEED = 100  # Percentage: 100 = normal speed
 DOWNLOAD_CHUNK_SIZE = 256 * 1024  # 256 KB for streaming URL downloads
-HTTP_USER_AGENT = _config["http"]["USER_AGENT"]
+FPS_REPORT_INTERVAL_SEC = 5  # seconds between FPS reports when show_fps_report is True
 
 
 class MediaViewer(QWidget):
@@ -76,6 +79,8 @@ class MediaViewer(QWidget):
         height (int): Height of the viewer in pixels. Defaults to 400.
         loop_video (bool): Whether to loop video playback. Defaults to False.
         pixmap_provided (Optional[QPixmap]): Optional QPixmap to display directly. Defaults to None.
+        show_fps_report (bool): Whether to print FPS for debugging. Defaults to False.
+        scale_mode (str): "cover" = fill widget and crop; "fit" = fit inside with letterbox. Defaults to "cover".
     """
 
     def __init__(
@@ -87,6 +92,8 @@ class MediaViewer(QWidget):
         height: int = 400,
         loop_video: bool = False,
         pixmap_provided: Optional[QPixmap] = None,
+        show_fps_report: bool = False,
+        scale_mode: str = "cover",
     ) -> None:
         """
         Initialize the MediaViewer widget.
@@ -126,6 +133,8 @@ class MediaViewer(QWidget):
         self.corner_radius = corner_radius
         self.media_path = media_path
         self.loop_video = loop_video
+        self._show_fps_report = show_fps_report
+        self._scale_mode: str = "cover" if scale_mode != "fit" else "fit"
 
         self.media_layout = QVBoxLayout(self)
         self.media_layout.setContentsMargins(0, 0, 0, 0)
@@ -138,12 +147,18 @@ class MediaViewer(QWidget):
         self.is_video = False
         self.cap = None
         self.timer = None
+        self._frame_count = 0
+        self._fps_report_timer: Optional[QTimer] = None
+        self._frame_busy = False
+        self._display_buffer = (
+            None  # reused for same-size video path (numpy BGR when _QT_FORMAT_BGR)
+        )
         self.pixmap_provided = pixmap_provided
         self._async_runner = AsyncRunner()
         self._load_request_id = 0
         self._temp_download_path: Optional[str] = None
         if pixmap_provided:
-            scaled_pixmap = self.scaled_pixmap_cover(
+            scaled_pixmap = self._scaled_pixmap(
                 pixmap_provided, self.media_widget.width(), self.media_widget.height()
             )
             self.media_widget.setPixmap(scaled_pixmap)
@@ -192,6 +207,8 @@ class MediaViewer(QWidget):
                         if chunk:
                             tmp.write(chunk)
             except Exception:
+                from urllib.request import Request, urlopen
+
                 headers = {"User-Agent": HTTP_USER_AGENT}
                 req = Request(url, headers=headers)
                 with urlopen(req, timeout=15) as resp:  # nosec - user-provided URL
@@ -249,6 +266,8 @@ class MediaViewer(QWidget):
         self.media_widget.clear()
         self.media_widget.setText("Loading…")
 
+        from urllib.parse import urlparse
+
         parsed = urlparse(url)
         ext = os.path.splitext(parsed.path)[1].lower()
         # If URL has no extension, still download; try to treat as image by default.
@@ -292,6 +311,60 @@ class MediaViewer(QWidget):
             self.load_media(tmp_path)
 
         self._async_runner.run(run_download, on_complete=on_complete)
+
+    def _load_video_opencv(self, path: str) -> None:
+        """Load video with OpenCV (FFMPEG backend)."""
+        import cv2
+        import numpy as np
+
+        self._cv2 = cv2
+        self._np = np
+        self.is_video = True
+        self.cap = cv2.VideoCapture(path)
+        if not self.cap.isOpened():
+            log.error("Failed to open video file.")
+            self.cap = None
+            return
+
+        # Reusable buffer for same-size path (avoid per-frame alloc)
+        tw, th = self.media_widget.width(), self.media_widget.height()
+        self._display_buffer = np.empty((th, tw, 3), dtype=np.uint8)
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.next_frame)
+        fps = self.cap.get(cv2.CAP_PROP_FPS)
+        interval = int(1000 / fps) if fps > 0 else DEFAULT_VIDEO_INTERVAL_MS
+        self._frame_count = 0
+        if self._show_fps_report:
+            self._start_fps_report_timer()
+        self.timer.start(interval)
+
+    def _start_fps_report_timer(self) -> None:
+        """Start timer that every FPS_REPORT_INTERVAL_SEC seconds prints actual fps."""
+        self._stop_fps_report_timer()
+        self._fps_report_timer = QTimer(self)
+        self._fps_report_timer.timeout.connect(self._report_actual_fps)
+        self._fps_report_timer.start(FPS_REPORT_INTERVAL_SEC * 1000)
+
+    def _stop_fps_report_timer(self) -> None:
+        """Stop the FPS report timer."""
+        if self._fps_report_timer is not None:
+            self._fps_report_timer.stop()
+            self._fps_report_timer.deleteLater()
+            self._fps_report_timer = None
+
+    def _report_actual_fps(self) -> None:
+        """Report frames displayed in the past FPS_REPORT_INTERVAL_SEC seconds (actual fps). Only runs when show_fps_report is True."""
+        if not self._show_fps_report or self._frame_count == 0:
+            self._frame_count = 0
+            return
+        fps = self._frame_count / float(FPS_REPORT_INTERVAL_SEC)
+        msg = (
+            f"MediaViewer actual fps (past {FPS_REPORT_INTERVAL_SEC} sec): {fps:.1f} "
+            f"(frames={self._frame_count})"
+        )
+        log.debug(msg, extra={"console": True})
+        print(msg)
+        self._frame_count = 0
 
     def load_media(self, path: str) -> None:
         """
@@ -346,7 +419,7 @@ class MediaViewer(QWidget):
                 if pixmap.isNull():
                     log.error(f"Failed to load image: {path}")
                     return
-                scaled_pixmap = self.scaled_pixmap_cover(
+                scaled_pixmap = self._scaled_pixmap(
                     pixmap, self.media_widget.width(), self.media_widget.height()
                 )
                 self.media_widget.setPixmap(scaled_pixmap)
@@ -356,7 +429,14 @@ class MediaViewer(QWidget):
                 self.movie = QMovie(path)
                 if self.movie.isValid():
                     self.media_widget.setFixedSize(self.width(), self.height())
-                    self.movie.setScaledSize(self.media_widget.size())
+                    fr = self.movie.frameRect()
+                    sw, sh = self._scale_dimensions(
+                        fr.width(),
+                        fr.height(),
+                        self.media_widget.width(),
+                        self.media_widget.height(),
+                    )
+                    self.movie.setScaledSize(QSize(sw, sh))
                     self.movie.setCacheMode(QMovie.CacheAll)
                     self.movie.setSpeed(DEFAULT_MOVIE_SPEED)
                     self.media_widget.setMovie(self.movie)
@@ -365,18 +445,7 @@ class MediaViewer(QWidget):
                     log.error("Invalid GIF file or failed to load.")
 
             elif ext in [".mp4", ".avi", ".mov", ".mkv"]:
-                self.is_video = True
-                self.cap = cv2.VideoCapture(path)
-                if not self.cap.isOpened():
-                    log.error("Failed to open video file.")
-                    self.cap = None
-                    return
-
-                self.timer = QTimer()
-                self.timer.timeout.connect(self.next_frame)
-                fps = self.cap.get(cv2.CAP_PROP_FPS)
-                interval = int(1000 / fps) if fps > 0 else DEFAULT_VIDEO_INTERVAL_MS
-                self.timer.start(interval)
+                self._load_video_opencv(path)
             else:
                 log.warning(f"Unsupported media type: {ext}")
         except Exception as e:
@@ -386,11 +455,16 @@ class MediaViewer(QWidget):
         """
         Called periodically by timer to fetch and display the next video frame.
 
-        Automatically handles video looping if loop_video is enabled, and cleans up
-        resources when video playback ends.
+        Automatically handles video looping if loop_video is enabled. Skips if still
+        processing the previous frame to avoid piling up work.
         """
         if not self.cap:
             return
+        if self._frame_busy:
+            return
+
+        cv2 = self._cv2
+        np = self._np
 
         ret, frame = self.cap.read()
         if not ret:
@@ -403,38 +477,76 @@ class MediaViewer(QWidget):
                 self.cleanup_video_resources()
                 return
 
+        self._frame_busy = True
         try:
-            # Convert BGR to RGB
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            if _QT_FORMAT_BGR is None:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
             target_w = self.media_widget.width()
             target_h = self.media_widget.height()
             frame_h, frame_w, _ = frame.shape
-
-            scale = max(target_w / frame_w, target_h / frame_h)
-            new_w, new_h = int(frame_w * scale), int(frame_h * scale)
-
-            resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
-            x_start = (new_w - target_w) // 2
-            y_start = (new_h - target_h) // 2
-            cropped = resized[
-                y_start : y_start + target_h, x_start : x_start + target_w
-            ]
-
-            # Ensure contiguous array for QImage
-            cropped = np.ascontiguousarray(cropped)
-
-            qt_image = QImage(
-                cropped.data, target_w, target_h, 3 * target_w, QImage.Format_RGB888
+            qt_fmt = (
+                _QT_FORMAT_BGR if _QT_FORMAT_BGR is not None else QImage.Format_RGB888
             )
-            pixmap = QPixmap.fromImage(qt_image)
+            use_cover = self._scale_mode == "cover"
+
+            if use_cover and frame_w == target_w and frame_h == target_h:
+                # Same size (cover): copy into reusable buffer
+                if self._display_buffer is not None and self._display_buffer.shape == (
+                    target_h,
+                    target_w,
+                    3,
+                ):
+                    np.copyto(self._display_buffer, frame)
+                    qt_image = QImage(
+                        self._display_buffer.data,
+                        target_w,
+                        target_h,
+                        3 * target_w,
+                        qt_fmt,
+                    )
+                else:
+                    out = np.ascontiguousarray(frame)
+                    qt_image = QImage(
+                        out.data,
+                        target_w,
+                        target_h,
+                        3 * target_w,
+                        qt_fmt,
+                    )
+                pixmap = QPixmap.fromImage(qt_image)
+            else:
+                # Scale by mode: cover = fill and crop, fit = fit inside
+                new_w, new_h = self._scale_dimensions(
+                    frame_w, frame_h, target_w, target_h
+                )
+                resized = cv2.resize(
+                    frame, (new_w, new_h), interpolation=cv2.INTER_AREA
+                )
+                if use_cover and (new_w > target_w or new_h > target_h):
+                    x_start = (new_w - target_w) // 2
+                    y_start = (new_h - target_h) // 2
+                    cropped = resized[
+                        y_start : y_start + target_h, x_start : x_start + target_w
+                    ]
+                    out = np.ascontiguousarray(cropped)
+                    qt_image = QImage(
+                        out.data, target_w, target_h, 3 * target_w, qt_fmt
+                    )
+                else:
+                    out = np.ascontiguousarray(resized)
+                    qt_image = QImage(out.data, new_w, new_h, 3 * new_w, qt_fmt)
+                pixmap = QPixmap.fromImage(qt_image)
+
             self.media_widget.setPixmap(pixmap)
 
-            # Explicitly delete the frame to free memory
-            del frame, resized, cropped, qt_image, pixmap
+            if self._show_fps_report:
+                self._frame_count += 1
 
         except Exception as e:
             log.error(f"Error processing video frame: {e}", exc_info=True)
+        finally:
+            self._frame_busy = False
 
     def paintEvent(self, event: QPaintEvent) -> None:
         """
@@ -469,9 +581,22 @@ class MediaViewer(QWidget):
                 if self.is_video:
                     scaled = pixmap.scaled(
                         self.media_widget.size(),
-                        Qt.KeepAspectRatio,
+                        (
+                            Qt.KeepAspectRatio
+                            if self._scale_mode == "fit"
+                            else Qt.KeepAspectRatioByExpanding
+                        ),
                         Qt.SmoothTransformation,
                     )
+                    if self._scale_mode == "cover" and (
+                        scaled.width() > self.media_widget.width()
+                        or scaled.height() > self.media_widget.height()
+                    ):
+                        x = (scaled.width() - self.media_widget.width()) // 2
+                        y = (scaled.height() - self.media_widget.height()) // 2
+                        scaled = scaled.copy(
+                            x, y, self.media_widget.width(), self.media_widget.height()
+                        )
                     self.media_widget.setPixmap(scaled)
                 else:
                     if self.pixmap_provided:
@@ -484,7 +609,7 @@ class MediaViewer(QWidget):
                         if source_pixmap.isNull():
                             log.error(f"Failed to load pixmap from: {self.media_path}")
                             return
-                    scaled_pixmap = self.scaled_pixmap_cover(
+                    scaled_pixmap = self._scaled_pixmap(
                         source_pixmap,
                         self.media_widget.width(),
                         self.media_widget.height(),
@@ -498,6 +623,10 @@ class MediaViewer(QWidget):
         Clean up video-related resources to prevent memory leaks.
         """
         try:
+            self._frame_busy = False
+            self._display_buffer = None
+            self._stop_fps_report_timer()
+            self._frame_count = 0
             if self.timer and self.timer.isActive():
                 self.timer.stop()
                 self.timer.deleteLater()
@@ -547,19 +676,40 @@ class MediaViewer(QWidget):
             log.error(f"Error during closeEvent cleanup: {e}", exc_info=True)
         super().closeEvent(event)
 
-    def scaled_pixmap_cover(
+    def _scale_dimensions(
+        self,
+        src_w: int,
+        src_h: int,
+        target_w: int,
+        target_h: int,
+    ) -> tuple[int, int]:
+        """
+        Return (width, height) to scale source to target using current scale_mode.
+        cover: fill target, may be larger (then crop). fit: fit inside target.
+        """
+        if src_w <= 0 or src_h <= 0:
+            return (target_w, target_h)
+        if self._scale_mode == "fit":
+            scale = min(target_w / src_w, target_h / src_h)
+        else:
+            scale = max(target_w / src_w, target_h / src_h)
+        return (max(1, int(src_w * scale)), max(1, int(src_h * scale)))
+
+    def _scaled_pixmap(
         self, pixmap: QPixmap, target_width: int, target_height: int
     ) -> QPixmap:
         """
-        Scales and crops a pixmap to fill the target dimensions without distortion.
+        Scale pixmap to target size using current scale_mode (cover or fit).
+        """
+        if self._scale_mode == "fit":
+            return self._scaled_pixmap_fit(pixmap, target_width, target_height)
+        return self._scaled_pixmap_cover(pixmap, target_width, target_height)
 
-        Args:
-            pixmap (QPixmap): Original image.
-            target_width (int): Desired width.
-            target_height (int): Desired height.
-
-        Returns:
-            QPixmap: Cropped and scaled pixmap.
+    def _scaled_pixmap_cover(
+        self, pixmap: QPixmap, target_width: int, target_height: int
+    ) -> QPixmap:
+        """
+        Scales and crops a pixmap to fill the target dimensions (cover).
         """
         try:
             scaled = pixmap.scaled(
@@ -574,6 +724,40 @@ class MediaViewer(QWidget):
         except Exception as e:
             log.error(f"Error scaling pixmap: {e}", exc_info=True)
             return pixmap
+
+    def _scaled_pixmap_fit(
+        self, pixmap: QPixmap, target_width: int, target_height: int
+    ) -> QPixmap:
+        """
+        Scales a pixmap to fit inside target dimensions (letterbox/pillarbox).
+        """
+        try:
+            return pixmap.scaled(
+                target_width,
+                target_height,
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            )
+        except Exception as e:
+            log.error(f"Error scaling pixmap: {e}", exc_info=True)
+            return pixmap
+
+    def scaled_pixmap_cover(
+        self, pixmap: QPixmap, target_width: int, target_height: int
+    ) -> QPixmap:
+        """
+        Scales and crops a pixmap to fill the target dimensions without distortion.
+        Prefer using the widget's scale_mode via _scaled_pixmap for consistency.
+
+        Args:
+            pixmap (QPixmap): Original image.
+            target_width (int): Desired width.
+            target_height (int): Desired height.
+
+        Returns:
+            QPixmap: Cropped and scaled pixmap.
+        """
+        return self._scaled_pixmap_cover(pixmap, target_width, target_height)
 
     def play_video(self) -> None:
         """
@@ -614,28 +798,41 @@ class MediaViewer(QWidget):
         if frame is None:
             return
 
+        if not hasattr(self, "_np"):
+            import cv2
+            import numpy as np
+
+            self._cv2 = cv2
+            self._np = np
+        cv2 = self._cv2
+        np = self._np
+
         try:
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            qt_fmt = (
+                _QT_FORMAT_BGR if _QT_FORMAT_BGR is not None else QImage.Format_RGB888
+            )
+            if _QT_FORMAT_BGR is None:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
             target_w = self.media_widget.width()
             target_h = self.media_widget.height()
             frame_h, frame_w, _ = frame.shape
 
-            scale = max(target_w / frame_w, target_h / frame_h)
-            new_w, new_h = int(frame_w * scale), int(frame_h * scale)
-
+            new_w, new_h = self._scale_dimensions(frame_w, frame_h, target_w, target_h)
             resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
-            x_start = (new_w - target_w) // 2
-            y_start = (new_h - target_h) // 2
-            cropped = resized[
-                y_start : y_start + target_h, x_start : x_start + target_w
-            ]
 
-            cropped = np.ascontiguousarray(cropped)
+            if self._scale_mode == "cover" and (new_w > target_w or new_h > target_h):
+                x_start = (new_w - target_w) // 2
+                y_start = (new_h - target_h) // 2
+                cropped = resized[
+                    y_start : y_start + target_h, x_start : x_start + target_w
+                ]
+                out = np.ascontiguousarray(cropped)
+                qt_image = QImage(out.data, target_w, target_h, 3 * target_w, qt_fmt)
+            else:
+                out = np.ascontiguousarray(resized)
+                qt_image = QImage(out.data, new_w, new_h, 3 * new_w, qt_fmt)
 
-            qt_image = QImage(
-                cropped.data, target_w, target_h, 3 * target_w, QImage.Format_RGB888
-            )
             self.media_widget.setPixmap(QPixmap.fromImage(qt_image))
 
         except Exception as e:

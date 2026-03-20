@@ -63,7 +63,7 @@ class IMUKeyTracker(QObject):
                     _key_states[key] = True
                 elif event.type() == QKeyEvent.Type.KeyRelease:
                     _key_states[key] = False
-        return False 
+        return False
 
 
 class IMU:
@@ -95,7 +95,7 @@ class IMU:
     def _setup_key_tracking(self) -> None:
         """Set up key tracking for simulator mode."""
         global _event_filter_installed
-        
+
         try:
             app = QApplication.instance()
             if app is None:
@@ -117,7 +117,7 @@ class IMU:
             accel_x = 0.0
             accel_y = 0.0
             accel_z = 9.8
-            
+
             if _key_states[Qt.Key.Key_Left]:
                 accel_x += SIMULATOR_ACCEL_SCALE
 

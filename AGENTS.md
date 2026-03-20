@@ -147,7 +147,7 @@ container.add(text_box, x=100, y=200)  # With absolute positioning
 
 **Key methods:** `add(widget, x=None, y=None)`, `clear()`
 
-**Note:** Use `is_main_container=True` to inherit system themes (borders, positioning, sizing, fonts). For the main container of pages, it is recommended to always use `is_main_container=True` and `spacing=10`.
+**Note:** Use `is_main_container=True` to inherit system themes (borders, positioning, sizing, fonts). For the main container of pages, **always** use `is_main_container=True`, `spacing=10`, and `inner_margin` (e.g. `inner_margin=(10, 15)` or `inner_margin=10`) so content has appropriate padding and the UI looks good.
 
 #### VerticalContainer
 
@@ -156,7 +156,13 @@ Vertical layout container with automatic widget arrangement.
 ```python
 from raven_framework.components.vertical_container import VerticalContainer
 
-vbox = VerticalContainer(width=640, spacing=10)
+# Main page container: use spacing=10 and inner_margin for appropriate spacing
+vbox = VerticalContainer(
+    width=640,
+    spacing=10,
+    inner_margin=(10, 15),  # horizontal, vertical padding
+    is_main_container=True,
+)
 # Prefer adding all widgets together in one .add() call
 vbox.add(button1, button2, text_box)  # Stacks vertically
 ```
@@ -165,7 +171,7 @@ vbox.add(button1, button2, text_box)  # Stacks vertically
 
 **Key methods:** `add(*widgets)`, `clear()`
 
-**Note:** For the main container of pages, it is recommended to always use `is_main_container=True` and `spacing=10`. Prefer adding all widgets together in one `.add()` call instead of separate add functions.
+**Note:** For the main container of pages, **always** use `is_main_container=True`, `spacing=10`, and `inner_margin` (e.g. `inner_margin=(10, 15)`) so content has appropriate padding. Prefer adding all widgets together in one `.add()` call instead of separate add functions.
 
 #### HorizontalContainer
 
@@ -174,7 +180,13 @@ Horizontal layout container for side-by-side arrangement.
 ```python
 from raven_framework.components.horizontal_container import HorizontalContainer
 
-hbox = HorizontalContainer(width=640, spacing=10)
+# Main page container: use spacing=10 and inner_margin for appropriate spacing
+hbox = HorizontalContainer(
+    width=640,
+    spacing=10,
+    inner_margin=(10, 15),
+    is_main_container=True,
+)
 # Prefer adding all widgets together in one .add() call
 hbox.add(icon1, icon2, icon3)  # Stacks horizontally
 ```
@@ -183,7 +195,7 @@ hbox.add(icon1, icon2, icon3)  # Stacks horizontally
 
 **Key methods:** `add(*widgets)`, `clear()`
 
-**Note:** For the main container of pages, it is recommended to always use `is_main_container=True` and `spacing=10`. Prefer adding all widgets together in one `.add()` call instead of separate add functions.
+**Note:** For the main container of pages, **always** use `is_main_container=True`, `spacing=10`, and `inner_margin` (e.g. `inner_margin=(10, 15)`). Prefer adding all widgets together in one `.add()` call instead of separate add functions.
 
 ### UI Components
 
@@ -321,7 +333,7 @@ viewer.play_video()
 viewer.pause_video()
 ```
 
-**Key params:** `media_path` (local path or http(s) URL), `corner_radius`, `width`, `height`, `loop_video`
+**Key params:** `media_path` (local path or http(s) URL), `corner_radius`, `width`, `height`, `loop_video`, `scale_mode` ("cover" = fill widget and crop; "fit" = fit inside with letterbox; defaults to "cover")
 
 **Key methods:** `play_video()`, `pause_video()`
 
@@ -783,6 +795,18 @@ Raven Glass is designed for **comfort, presence, and real-world awareness**. The
 - Show only what's immediately necessary
 - Use pagination or progressive disclosure rather than showing everything at once
 - Prioritize clarity over completeness
+- Always add appropriate margins and spacings so UI looks good.
+
+### Layout & Spacing (Required for Main Containers)
+
+**Agents must apply these rules whenever building a page or screen:**
+
+- **Main containers:** Any `Container`, `VerticalContainer`, or `HorizontalContainer` that wraps the primary content of a page/screen must use:
+  - `spacing=10` (consistent gap between child widgets)
+  - `inner_margin` so content is not flush to edges — use e.g. `inner_margin=(10, 15)` (horizontal, vertical) or `inner_margin=10` (uniform)
+  - `is_main_container=True` when using theme inheritance
+- **Do not** add cards or content directly to `self.app` without wrapping them in a container that has `inner_margin` and `spacing=10`; otherwise the layout will look cramped and unpolished.
+- **Example:** When a screen shows only a single card, wrap that card in a `VerticalContainer` with `spacing=10`, `inner_margin=(10, 15)`, and `is_main_container=True`, then add the container to `self.app`.
 
 ### Layout Principles
 
@@ -825,6 +849,7 @@ Raven Glass is designed for **comfort, presence, and real-world awareness**. The
 - ✅ Design for peripheral awareness
 - ✅ Use system fonts and theme colors
 - ✅ Keep UI calm and ambient
+- ✅ Use `spacing=10` and `inner_margin` (e.g. `inner_margin=(10, 15)`) on all main page containers so layouts have appropriate spacing
 
 **DON'T:**
 - ❌ Use a lot of text or dense content
@@ -834,6 +859,7 @@ Raven Glass is designed for **comfort, presence, and real-world awareness**. The
 - ❌ Use custom fonts (especially on buttons)
 - ❌ Create dense, cluttered layouts
 - ❌ Rely on color alone for meaning
+- ❌ Omit `inner_margin` or `spacing` on main containers (content will look flush and cramped)
 
 ## Complete Example Applications
 
@@ -867,7 +893,7 @@ class HelloWorld(RavenApp):
 if __name__ == "__main__":
     # Launch the app using RunApp.run()
     # lambda: HelloWorld() creates a new instance of the app
-    # app_id and app_key are required for deployment
+    # app_id="" and app_key="" are empty for simulator mode
     RunApp.run(lambda: HelloWorld(), app_id="", app_key="")
 ```
 
@@ -878,11 +904,8 @@ if __name__ == "__main__":
 from enum import Enum
 
 # Raven Framework Imports
-from raven_framework import RavenApp, Routine, RunApp, themes, fade_in
-from raven_framework.cards import TextCardWithButton, TextCardWithTwoButtons
-
-# Raven Framework Heavier Imports
-from raven_framework import MediaViewer
+from raven_framework import RavenApp, Routine, RunApp, fade_in
+from raven_framework.components.cards import TextCardWithButton, TextCardWithTwoButtons
 
 # Constants - maximum time to display, container width, and font size
 MAX_TIME = 3600
@@ -906,6 +929,7 @@ def seconds_to_time_string(seconds: int) -> str:
 # Enum to represent the different states of the stopwatch
 class AppState(Enum):
     """Application state enumeration."""
+
     # Stopwatch is actively counting
     RUNNING = "running"
     # Stopwatch is paused (time preserved)
@@ -938,7 +962,7 @@ class Stopwatch(RavenApp):
         # Clear the app to remove any existing widgets
         self.app.clear()
         self.main_container = None
-        
+
         # Create different UI based on current state
         if self.app_state == AppState.STOPPED:
             if self.elapsed_time > 0:
@@ -1081,18 +1105,16 @@ from raven_framework import (
     Button,
     RavenApp,
     RunApp,
-    themes,
 )
-from raven_framework.cards import ScrollableListCard
-
-# Raven Framework Heavier Imports
-from raven_framework import MediaViewer
+from raven_framework.components.media_viewer import MediaViewer
+from raven_framework.components.cards import ScrollableListCard
 
 
 # Data Classes
 @dataclass
 class Painting:
     """Data class for painting information."""
+
     # Name of the painting
     title: str
     # File path to the image
@@ -1120,6 +1142,7 @@ PAINTINGS = {
 # Enums
 class AppState(Enum):
     """Application state enumeration."""
+
     # Showing the list of paintings
     PAINTING_LIST = "painting_list"
     # Showing a single painting
@@ -1229,9 +1252,7 @@ class ArtStudio(RavenApp):
 
 
 if __name__ == "__main__":
-    RunApp.run(
-        lambda: ArtStudio(), app_id="", app_key=""
-    )
+    RunApp.run(lambda: ArtStudio(), app_id="", app_key="")
 ```
 
 ### Simple AI App
@@ -1239,7 +1260,7 @@ if __name__ == "__main__":
 ```python
 # Import Raven Framework components
 from raven_framework import AsyncRunner, RavenApp, RunApp
-from raven_framework.cards import TextCardWithButton
+from raven_framework.components.cards import TextCardWithButton
 from raven_framework.helpers.open_ai_helper import OpenAiHelper
 from raven_framework.peripherals.camera import Camera
 from raven_framework.peripherals.microphone import Microphone
@@ -1449,6 +1470,7 @@ from raven_framework.helpers.open_ai_helper import OpenAiHelper
 - Always call `super().__init__(parent)` in `__init__`
 - Use `self.app.clear()` before rebuilding UI
 - Position widgets at right edge: `x=self.app.width() - widget.width()`
+- Use `spacing=10` and `inner_margin` (e.g. `inner_margin=(10, 15)`) on main page containers so content has appropriate padding
 - Use `AsyncRunner` for heavy operations to avoid blocking UI
 - Initialize sensors lazily (only when needed)
 - Use `fade_in()` at end of `__init__` for smooth appearance

@@ -72,7 +72,8 @@ def get_log_directory() -> str:
     if os.path.exists(DOCKERENV_PATH) or os.environ.get(CONTAINER_ENV_VAR) == "true":
         return CONTAINER_LOG_DIR
     else:
-        raven_framework_dir = os.path.dirname(__file__)
+        helpers_dir = os.path.dirname(__file__)
+        raven_framework_dir = os.path.dirname(helpers_dir)
         root_dir = os.path.dirname(raven_framework_dir)
 
         return os.path.join(root_dir, LOG_SUBDIR)

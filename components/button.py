@@ -18,11 +18,9 @@ scaling animations, and support for embedded content widgets.
 """
 
 # Standard library imports
-import json
 import math
 import os
 from functools import partial
-from pathlib import Path
 from typing import Any, Callable, Optional
 
 # PySide6 imports

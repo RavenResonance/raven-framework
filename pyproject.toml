@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "raven_framework"
-version = "1.0.1"
+version = "1.0.2"
 description = "A comprehensive UI framework for building Raven applications with PySide6"
 readme = "README.md"
 license = {text = "Proprietary - Copyright (c) 2026 Raven Resonance, Inc. All Rights Reserved."}

@@ -17,12 +17,11 @@ This module provides the main entry point for running Raven applications,
 with support for deployment and remote upload functionality.
 """
 
-import asyncio
 import atexit
 import glob
-import json
 import os
 import py_compile
+import queue
 import shutil
 import signal
 import sys
@@ -30,15 +29,14 @@ import threading
 import time
 import traceback
 import zipfile
-from enum import Enum
-from pathlib import Path
 from typing import Callable, List, Optional
 
-import requests
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QCloseEvent, QImage, QPainterPath, QPixmap, QRegion
+from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QThread, QTimer, Signal
+from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QFrame,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -49,11 +47,10 @@ from PySide6.QtWidgets import (
 
 from ..helpers.font_utils import preload_fonts
 from ..helpers.logger import get_logger
+from ..helpers.routine import Routine
 from ..helpers.utils_light import is_raven_device, load_config, set_custom_circle_cursor
 
 log = get_logger("RunApp")
-
-# Load configuration
 _config = load_config()
 
 # Extract constants from config
@@ -61,11 +58,9 @@ BASE_API_URL = _config["deployment"]["BASE_API_URL"]
 ACCEPTING_DEPLOYMENTS = _config["deployment"].get("ACCEPTING_DEPLOYMENTS", True)
 OVERLAY_FRAME_RATE = _config["fps"]["SIMULATOR_FPS"]
 BACKGROUND_VIDEO_FRAME_RATE = _config["fps"]["SIMULATOR_FPS"]
-CAST_FRAME_RATE_RAVEN_DEVICE = _config["fps"].get("CAST_FPS_RAVEN_DEVICE")
-CAST_FRAME_RATE_NON_RAVEN_DEVICE = _config["fps"].get("CAST_FPS_NON_RAVEN_DEVICE")
 DISPLAY_RESOLUTION = tuple(_config["resolution"]["DISPLAY_RESOLUTION"])
 APP_RESOLUTION = tuple(_config["resolution"]["APP_RESOLUTION"])
-APP_WINDOW_RESOLUTION = (DISPLAY_RESOLUTION[0], DISPLAY_RESOLUTION[1] + 60)
+APP_WINDOW_RESOLUTION = (DISPLAY_RESOLUTION[0], DISPLAY_RESOLUTION[1])
 OVERLAY_RESOLUTION = (DISPLAY_RESOLUTION[0] + 80, DISPLAY_RESOLUTION[1] + 20)
 SIMULATOR_WINDOW_POSITION = (DISPLAY_RESOLUTION[0], 0)
 DEFAULT_OVERLAY_BRIGHTNESS = _config["simulator"]["DEFAULT_OVERLAY_BRIGHTNESS"]
@@ -84,502 +79,226 @@ OVERLAY_BACKGROUND_VIDEO_NIGHT_PATH = _config["simulator"][
 OVERLAY_BACKGROUND_VIDEO_OUTDOORS_PATH = _config["simulator"][
     "OVERLAY_BACKGROUND_VIDEO_OUTDOORS_PATH"
 ]
+RAW_MODE_TOOLTIP_TEXT = _config["simulator"]["RAW_MODE_TOOLTIP_TEXT"]
+
 RIGHT_WINDOW_OFFSET = 0
+CLIENT_DEVICE_ADDITIONAL_WINDOW_HEIGHT = 60  # To show button for simulator
+
+_IS_RAVEN_DEVICE = is_raven_device()
+
+USE_SIMPLE_ADDITIVE_BLEND = False
+PRINT_SIMULATOR_PERFORMANCE = False
 
 
-class OverlayBackgroundPreset(Enum):
-    """Enum for overlay background presets."""
+def _cleanup_snapshot_tmp(snapshot_path: str, tmp_dir: str) -> None:
+    """Remove the snapshot file, any in-progress .tmp file, and tmp dir if empty."""
+    try:
+        if os.path.exists(snapshot_path):
+            os.remove(snapshot_path)
+            log.info(f"Cleaned up snapshot file: {snapshot_path}")
+        tmp_file = snapshot_path + ".tmp"
+        if os.path.exists(tmp_file):
+            try:
+                os.remove(tmp_file)
+                log.info(f"Cleaned up snapshot temp file: {tmp_file}")
+            except OSError as e:
+                log.warning(f"Failed to remove snapshot temp file {tmp_file}: {e}")
+        if os.path.exists(tmp_dir):
+            try:
+                if not os.listdir(tmp_dir):
+                    os.rmdir(tmp_dir)
+                    log.info(f"Removed empty tmp directory: {tmp_dir}")
+            except OSError:
+                pass
+    except Exception as e:
+        log.warning(f"Failed to cleanup snapshot file: {e}")
 
-    NIGHT = "night"
-    DAY = "day"
-    OUTDOORS = "outdoors"
-    CAMERA = "camera"
+
+def _save_snapshot_in_background(
+    image: QImage,
+    path: str,
+    thread_active_ref: List[bool],
+) -> None:
+    """Save image to disk in background (for simulator overlay only)."""
+    try:
+        image = image.copy()
+        temp_path = path + ".tmp"
+        image.save(temp_path, "PNG")
+        os.replace(temp_path, path)
+    except Exception as e:
+        log.error(f"Failed to save widget snapshot: {e}")
+        temp_path = path + ".tmp"
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+    finally:
+        thread_active_ref[0] = False
 
 
-OVERLAY_BACKGROUND_PRESETS = [preset.value for preset in OverlayBackgroundPreset]
-
-
-class OverlayWidget(QMainWindow):
+def _handle_deploy(args: List[str], app_id: str, app_key: str) -> None:
     """
-    A widget that displays a background image with a snapshot overlaid on top.
-
-    This widget shows a background image as full screen and composites
-    assets/widget_snapshot.png centered on top using additive blending with OpenCV.
-    Includes buttons at the bottom to switch between background presets.
+    If deploy or deploy-pyc was requested, run build+upload and return.
+    Caller should return after calling this when deploy was requested.
     """
+    if len(args) == 0 or args[0] not in ("deploy", "deploy-pyc"):
+        return
+    if is_raven_device():
+        log.info("Deploy not available on device.")
+        return
+    if not ACCEPTING_DEPLOYMENTS:
+        error_msg = "Not accepting deployments right now, contact Raven Resonance team to get access"
+        log.warning(error_msg)
+        print(f"{error_msg}", file=sys.stdout)
+        return
+    if app_id == "":
+        error_msg = "Please add app_id to function call"
+        log.error(error_msg)
+        print(f"ERROR: {error_msg}", file=sys.stderr)
+        return
+    if app_key == "":
+        error_msg = "Please add app_key to function call"
+        log.error(error_msg)
+        print(f"ERROR: {error_msg}", file=sys.stderr)
+        return
+    compile_pyc = args[0] == "deploy-pyc"
+    log.info(f"Deployment mode: {'compiled (.pyc)' if compile_pyc else 'source (.py)'}")
+    build_path = RunApp.deploy_app(compile_pyc=compile_pyc)
+    if not build_path:
+        error_msg = "Failed to create build package, cannot upload"
+        log.error(error_msg)
+        print(f"ERROR: {error_msg}", file=sys.stderr)
+        return
+    log.info(f"Build path: {build_path}")
+    print(f"Build path: {build_path}", file=sys.stdout)
+    data = {"app_id": app_id, "app_key": app_key}
+    developer_end_point = f"{BASE_API_URL}/rest/api/developer/run/app/"
+    print("Uploading package...", file=sys.stdout)
+    import requests
 
-    def __init__(
-        self,
-        snapshot_path: str,
-        framework_dir: str,
-        resolution: tuple[int, int] = OVERLAY_RESOLUTION,
-        brightness: float = DEFAULT_OVERLAY_BRIGHTNESS,
-    ) -> None:
-        """
-        Initialize the OverlayWidget.
+    with open(build_path, "rb") as build_file:
+        files = {"rav_build": build_file}
+        response = requests.post(url=developer_end_point, data=data, files=files)
+    upload_msg = f"Upload response status: {response.status_code}"
+    log.info(upload_msg)
+    if response.status_code == 200:
+        print(f"{upload_msg} - Upload successful!", file=sys.stdout)
+    else:
+        print(f"{upload_msg} - Upload failed!", file=sys.stderr)
 
-        Args:
-            snapshot_path (str): Path to the snapshot image file to display.
-            framework_dir (str): Path to the framework directory containing overlay_backgrounds.
-            resolution (tuple[int, int]): Resolution of the overlay window (width, height).
-                Defaults to OVERLAY_RESOLUTION.
-            brightness (float): Brightness multiplier for the snapshot (0.0 to 2.0+).
-                1.0 = normal, <1.0 = dimmer, >1.0 = brighter. Defaults to 1.0.
-        """
+
+def _qt_exception_handler(exc_type, exc_value, exc_traceback) -> None:
+    """Handle unhandled exceptions in Qt event loop."""
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        return
+    error_msg = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+    print("\n" + "=" * 80, file=sys.stderr)
+    print("ERROR: Unhandled exception in your application!", file=sys.stderr)
+    print("=" * 80, file=sys.stderr)
+    print(error_msg, file=sys.stderr)
+    print("=" * 80 + "\n", file=sys.stderr)
+    log.error(f"Unhandled exception in application: {exc_value}", exc_info=True)
+    sys.exit(1)
+
+
+def _make_snapshot_signal_handler(snapshot_path: str, tmp_dir: str):
+    """Return a signal handler that cleans up snapshot and exits."""
+
+    def handler(signum, frame):
+        _cleanup_snapshot_tmp(snapshot_path, tmp_dir)
+        sys.exit(0)
+
+    return handler
+
+
+def _capture_widget_snapshot(
+    app_widget: QWidget,
+    snapshot_path: str,
+    thread_active_ref: List[bool],
+) -> None:
+    """Grab widget on main thread, then save to disk in background (simulator overlay only)."""
+    try:
+        if thread_active_ref[0]:
+            return
+        pixmap = app_widget.grab()
+        image = pixmap.toImage()
+        thread_active_ref[0] = True
+        threading.Thread(
+            target=_save_snapshot_in_background,
+            args=(image, snapshot_path, thread_active_ref),
+            daemon=True,
+        ).start()
+    except Exception as e:
+        log.error(f"Failed to capture widget snapshot: {e}")
+        thread_active_ref[0] = False
+
+
+class _BlendWorker(QObject):
+    """Runs in a QThread; reads (app_bytes, w, h, seq, brightness) from queue, gets bg from get_bg(), blends, emits result."""
+
+    result_ready = Signal(object, int, int, int)  # (rgb_bytes, width, height, sequence)
+
+    def __init__(self, blend_queue: queue.Queue, get_bg_fn) -> None:
         super().__init__()
-        # Set window title
-        self.setWindowTitle("Simulated Preview - Non Interactable (alpha v0.1)")
-        self.snapshot_path = snapshot_path
-        self.framework_dir = framework_dir
-        self.resolution = resolution
-        self.brightness = brightness
-        self.current_preset = OverlayBackgroundPreset.NIGHT
-        self.camera_capture = None  # Used when camera mode is selected in simulator
-        self.video_capture = None  # Used when specific video is selected in simulator
+        self._queue = blend_queue
+        self._get_bg = get_bg_fn
 
-        try:
-            container = QWidget(self)
-            container.setFixedSize(self.resolution[0], self.resolution[1])
+    def process_loop(self) -> None:
+        import cv2
+        import numpy as np
 
-            self.composite_label = QLabel(container)
-            self.composite_label.setGeometry(
-                0, 0, self.resolution[0], self.resolution[1]
-            )
-            self.composite_label.setAlignment(Qt.AlignCenter)
-            self.composite_label.setScaledContents(True)
-
-            self.background_buttons = []
-            button_width = 100
-            button_height = 45
-            button_spacing = 12
-            total_buttons_width = (button_width * len(OVERLAY_BACKGROUND_PRESETS)) + (
-                button_spacing * (len(OVERLAY_BACKGROUND_PRESETS) - 1)
-            )
-            start_x = (self.resolution[0] - total_buttons_width) // 2
-            bottom_margin = 20
-            button_y = self.resolution[1] - button_height - bottom_margin
-
-            button_style = """
-                QPushButton {
-                    background-color: rgba(30, 30, 30, 200);
-                    color: white;
-                    border: 2px solid rgba(255, 255, 255, 255);
-                    border-radius: 22px;
-                    font-size: 14px;
-                    font-weight: 600;
-                    padding: 8px 16px;
-                }
-                QPushButton:hover {
-                    background-color: rgba(50, 50, 50, 220);
-                    border: 2px solid rgba(255, 255, 255, 255);
-                }
-                QPushButton:pressed {
-                    background-color: rgba(70, 70, 70, 240);
-                    border: 2px solid rgba(255, 255, 255, 255);
-                }
-            """
-
-            for i, preset_enum in enumerate(OverlayBackgroundPreset):
-                preset_str = preset_enum.value
-                button = QPushButton(preset_str.capitalize(), container)
-                button_x = start_x + i * (button_width + button_spacing)
-                button.setGeometry(button_x, button_y, button_width, button_height)
-                button.setStyleSheet(button_style)
-                button.clicked.connect(
-                    lambda checked, p=preset_str: self.change_background(p)
-                )
-                button.hide()
-                self.background_buttons.append(button)
-
-            self.setCentralWidget(container)
-
-            self.setFixedSize(self.resolution[0], self.resolution[1])
-
-            # self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
-
-            self.update_timer = QTimer()
-            self.update_timer.timeout.connect(self.update_composite)
-            if OVERLAY_FRAME_RATE <= 0:
-                error_msg = (
-                    f"OVERLAY_FRAME_RATE must be positive, got {OVERLAY_FRAME_RATE}"
-                )
-                log.error(error_msg, extra={"console": True})
-                raise ValueError(error_msg)
-            timer_interval = int(1000 / BACKGROUND_VIDEO_FRAME_RATE)
-            self.update_timer.start(timer_interval)
-
-            self.update_background_path()
-            video_presets = [
-                OverlayBackgroundPreset.DAY,
-                OverlayBackgroundPreset.NIGHT,
-                OverlayBackgroundPreset.OUTDOORS,
-            ]
-            if self.current_preset in video_presets:
-                if self.open_video():
-                    import cv2
-
-                    fps = self.video_capture.get(cv2.CAP_PROP_FPS)
-                    if fps > 0:
-                        timer_interval = int(1000 / fps)
-                        self.update_timer.setInterval(timer_interval)
-            self.update_composite()
-
-            log.info("OverlayWidget initialized successfully.")
-        except Exception as e:
-            log.error(f"Failed to initialize OverlayWidget: {e}", exc_info=True)
-            raise
-
-    def update_background_path(self) -> None:
-        """Update the background path based on current preset."""
-        if self.current_preset == OverlayBackgroundPreset.CAMERA:
-            self.background_path = None
-        elif self.current_preset == OverlayBackgroundPreset.DAY:
-            self.background_path = os.path.join(
-                self.framework_dir,
-                OVERLAY_BACKGROUND_VIDEO_DAY_PATH,
-            )
-        elif self.current_preset == OverlayBackgroundPreset.NIGHT:
-            self.background_path = os.path.join(
-                self.framework_dir,
-                OVERLAY_BACKGROUND_VIDEO_NIGHT_PATH,
-            )
-        elif self.current_preset == OverlayBackgroundPreset.OUTDOORS:
-            self.background_path = os.path.join(
-                self.framework_dir,
-                OVERLAY_BACKGROUND_VIDEO_OUTDOORS_PATH,
-            )
-        else:
-            self.background_path = os.path.join(
-                self.framework_dir,
-                "overlay_backgrounds",
-                f"{self.current_preset.value}.png",
-            )
-
-    def open_camera(self) -> bool:
-        """
-        Open the camera for video capture.
-
-        Returns:
-            bool: True if camera opened successfully, False otherwise.
-        """
-        if self.camera_capture is not None:
-            return True
-
-        try:
-            import cv2
-
-            self.camera_capture = cv2.VideoCapture(0)
-            if not self.camera_capture.isOpened():
-                log.error("Could not open camera")
-                self.camera_capture = None
-                return False
-            # Discard initial frames to allow camera to stabilize
-            for _ in range(INITIAL_CAMERA_FRAMES_TO_DISCARD):
-                self.camera_capture.read()
-            log.info("Camera opened successfully")
-            return True
-        except Exception as e:
-            log.error(f"Error opening camera: {e}", exc_info=True)
-            self.camera_capture = None
-            return False
-
-    def close_camera(self) -> None:
-        """Close the camera and release resources."""
-        if self.camera_capture is not None:
+        while True:
             try:
-                self.camera_capture.release()
-                self.camera_capture = None
-                log.info("Camera closed")
-            except Exception as e:
-                log.error(f"Error closing camera: {e}", exc_info=True)
-
-    def open_video(self) -> bool:
-        """
-        Open the video file for playback using MediaViewer's video handling pattern.
-
-        Returns:
-            bool: True if video opened successfully, False otherwise.
-        """
-        if self.video_capture is not None:
-            return True
-
-        try:
-            import cv2
-
-            if self.background_path is None or not os.path.exists(self.background_path):
-                log.error(f"Video file not found: {self.background_path}")
-                return False
-
-            self.video_capture = cv2.VideoCapture(self.background_path)
-            if not self.video_capture.isOpened():
-                log.error(f"Could not open video: {self.background_path}")
-                self.video_capture = None
-                return False
-            log.info(f"Video opened successfully: {self.background_path}")
-            return True
-        except Exception as e:
-            log.error(f"Error opening video: {e}", exc_info=True)
-            self.video_capture = None
-            return False
-
-    def close_video(self) -> None:
-        """Close the video and release resources using MediaViewer's cleanup pattern."""
-        if self.video_capture is not None:
+                item = self._queue.get()
+            except Exception:
+                break
+            if item is None:
+                break
             try:
-                self.video_capture.release()
-                self.video_capture = None
-                log.info("Video closed")
-            except Exception as e:
-                log.error(f"Error closing video: {e}", exc_info=True)
-
-    def change_background(self, preset: str) -> None:
-        """
-        Change the background preset.
-
-        Args:
-            preset (str): Background preset name ("day", "night", "outdoors", or "camera").
-        """
-        try:
-            preset_enum = OverlayBackgroundPreset(preset.lower())
-        except ValueError:
-            log.warning(f"Invalid background preset: {preset}")
-            return
-
-        video_presets = [
-            OverlayBackgroundPreset.DAY,
-            OverlayBackgroundPreset.NIGHT,
-            OverlayBackgroundPreset.OUTDOORS,
-        ]
-
-        if (
-            self.current_preset == OverlayBackgroundPreset.CAMERA
-            and preset_enum != OverlayBackgroundPreset.CAMERA
-        ):
-            self.close_camera()
-            timer_interval = int(1000 / BACKGROUND_VIDEO_FRAME_RATE)
-            self.update_timer.setInterval(timer_interval)
-
-        if self.current_preset in video_presets and preset_enum not in video_presets:
-            self.close_video()
-            timer_interval = int(1000 / BACKGROUND_VIDEO_FRAME_RATE)
-            self.update_timer.setInterval(timer_interval)
-
-        if (
-            self.current_preset in video_presets
-            and preset_enum in video_presets
-            and self.current_preset != preset_enum
-        ):
-            self.close_video()
-
-        if (
-            preset_enum == OverlayBackgroundPreset.CAMERA
-            and self.current_preset != OverlayBackgroundPreset.CAMERA
-        ):
-            if not self.open_camera():
-                log.error("Failed to open camera, keeping current preset")
-                return
-            timer_interval = int(1000 / BACKGROUND_VIDEO_FRAME_RATE)
-            self.update_timer.setInterval(timer_interval)
-
-        if preset_enum in video_presets and (
-            self.current_preset not in video_presets
-            or self.current_preset != preset_enum
-        ):
-            self.current_preset = preset_enum
-            self.update_background_path()
-            if not self.open_video():
-                log.error("Failed to open video, keeping current preset")
-                return
-            import cv2
-
-            fps = self.video_capture.get(cv2.CAP_PROP_FPS)
-            if fps > 0:
-                timer_interval = int(1000 / fps)
-            else:
-                log.warning("Video FPS not found, using camera frame rate")
-                timer_interval = int(1000 / BACKGROUND_VIDEO_FRAME_RATE)  # Fallback
-            self.update_timer.setInterval(timer_interval)
-        else:
-            self.current_preset = preset_enum
-            self.update_background_path()
-
-        self.update_composite()
-        log.info(f"Background changed to: {preset}")
-
-    def closeEvent(self, event: QCloseEvent) -> None:
-        """Handle widget close event to cleanup camera, video, and timer."""
-        if self.update_timer and self.update_timer.isActive():
-            self.update_timer.stop()
-        self.close_camera()
-        self.close_video()
-        super().closeEvent(event)
-
-    def update_composite(self) -> None:
-        """Update the composited image using additive blending with OpenCV."""
-        # Skip updates if window is not visible to save resources
-        if not self.isVisible():
-            return
-
-        import cv2  # load here so it's not loaded every time an app runs
-
-        try:
-            composite_width = self.resolution[0]
-            composite_height = self.resolution[1]
-
-            if self.current_preset == OverlayBackgroundPreset.CAMERA:
-                if self.camera_capture is None or not self.camera_capture.isOpened():
-                    log.warning("Camera not available")
-                    return
-                ret, background = self.camera_capture.read()
-                if not ret or background is None:
-                    log.warning("Failed to read frame from camera")
-                    return
-
-                cam_height, cam_width = background.shape[:2]
-                target_aspect = composite_width / composite_height
-                cam_aspect = cam_width / cam_height
-
-                if cam_aspect > target_aspect:
-                    new_height = composite_height
-                    new_width = int(cam_width * (composite_height / cam_height))
-                    background = cv2.resize(
-                        background,
-                        (new_width, new_height),
-                        interpolation=cv2.INTER_LINEAR,
-                    )
-                    crop_x = (new_width - composite_width) // 2
-                    background = background[:, crop_x : crop_x + composite_width]
-                else:
-                    new_width = composite_width
-                    new_height = int(cam_height * (composite_width / cam_width))
-                    background = cv2.resize(
-                        background,
-                        (new_width, new_height),
-                        interpolation=cv2.INTER_LINEAR,
-                    )
-                    crop_y = (new_height - composite_height) // 2
-                    background = background[crop_y : crop_y + composite_height, :]
-            elif self.current_preset in [
-                OverlayBackgroundPreset.DAY,
-                OverlayBackgroundPreset.NIGHT,
-                OverlayBackgroundPreset.OUTDOORS,
-            ]:
-                if self.video_capture is None or not self.video_capture.isOpened():
-                    log.warning("Video not available")
-                    return
-                ret, background = self.video_capture.read()
-                if not ret or background is None:
-                    log.debug("Video ended, looping back to start")
-                    self.video_capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                    ret, background = self.video_capture.read()
-                    if not ret or background is None:
-                        log.warning("Failed to read frame from video after looping")
-                        return
-
-                video_height, video_width = background.shape[:2]
-                target_aspect = composite_width / composite_height
-                video_aspect = video_width / video_height
-
-                if video_aspect > target_aspect:
-                    new_height = composite_height
-                    new_width = int(video_width * (composite_height / video_height))
-                    background = cv2.resize(
-                        background,
-                        (new_width, new_height),
-                        interpolation=cv2.INTER_LINEAR,
-                    )
-                    crop_x = (new_width - composite_width) // 2
-                    background = background[:, crop_x : crop_x + composite_width]
-                else:
-                    new_width = composite_width
-                    new_height = int(video_height * (composite_width / video_width))
-                    background = cv2.resize(
-                        background,
-                        (new_width, new_height),
-                        interpolation=cv2.INTER_LINEAR,
-                    )
-                    crop_y = (new_height - composite_height) // 2
-                    background = background[crop_y : crop_y + composite_height, :]
-            else:
-                if self.background_path is None or not os.path.exists(
-                    self.background_path
-                ):
-                    log.warning(f"Background image not found: {self.background_path}")
-                    return
-
-                background = cv2.imread(self.background_path)
-                if background is None:
-                    log.warning(
-                        f"Failed to load background image: {self.background_path}"
-                    )
-                    return
-
-                background = cv2.resize(
-                    background,
-                    (composite_width, composite_height),
-                    interpolation=cv2.INTER_LINEAR,
+                app_bytes, w, h, seq, brightness = item
+                snapshot_rgb = np.frombuffer(app_bytes, dtype=np.uint8).reshape(
+                    (h, w, 3)
                 )
-
-            snapshot = None
-            if os.path.exists(self.snapshot_path):
-                snapshot = cv2.imread(self.snapshot_path)
-                if snapshot is not None:
-                    snapshot = cv2.resize(
-                        snapshot,
-                        (APP_RESOLUTION[0], APP_RESOLUTION[1]),
+                bg_rgb = self._get_bg()
+                if bg_rgb is None:
+                    bg_rgb = np.full((h, w, 3), (40, 40, 40), dtype=np.uint8)
+                bg_bgr = cv2.cvtColor(bg_rgb, cv2.COLOR_RGB2BGR)
+                snapshot_bgr = cv2.cvtColor(snapshot_rgb, cv2.COLOR_RGB2BGR)
+                if snapshot_bgr.shape[:2] != bg_bgr.shape[:2]:
+                    snapshot_bgr = cv2.resize(
+                        snapshot_bgr,
+                        (bg_bgr.shape[1], bg_bgr.shape[0]),
                         interpolation=cv2.INTER_LINEAR,
                     )
-
-                    x = (composite_width - APP_RESOLUTION[0]) // 2 + RIGHT_WINDOW_OFFSET
-                    y = (composite_height - APP_RESOLUTION[1]) // 2
-
-                    ### BLENDING LOGIC ###
-
-                    # Apply brightness adjustment to snapshot
-                    if self.brightness != 1.0:
-                        snapshot_adjusted = cv2.convertScaleAbs(
-                            snapshot, alpha=self.brightness, beta=0
-                        )
-                    else:
-                        snapshot_adjusted = snapshot
-
-                    # Extract the region where snapshot will be placed
-                    roi = background[
-                        y : y + APP_RESOLUTION[1], x : x + APP_RESOLUTION[0]
-                    ]
-
-                    # Apply additive blending: add snapshot to background region
-                    blended_roi = cv2.add(roi, snapshot_adjusted)
-
-                    # Place the blended region back (modify background in place)
-                    background[y : y + APP_RESOLUTION[1], x : x + APP_RESOLUTION[0]] = (
-                        blended_roi
+                if brightness != 1.0:
+                    snapshot_bgr = cv2.convertScaleAbs(
+                        snapshot_bgr, alpha=brightness, beta=0
                     )
-
-                    composite = background
-
-                    ### END BLENDING LOGIC ###
+                if USE_SIMPLE_ADDITIVE_BLEND:
+                    blended = cv2.add(bg_bgr, snapshot_bgr)
                 else:
-                    composite = background
-                    log.debug(f"Snapshot not available, using background only")
-            else:
-                composite = background
-                log.debug(f"Snapshot file not found: {self.snapshot_path}")
+                    blended = blend_frame(bg_bgr, snapshot_bgr)
+                blended_rgb = np.ascontiguousarray(
+                    cv2.cvtColor(blended, cv2.COLOR_BGR2RGB)
+                )
+                out_h, out_w = blended_rgb.shape[:2]
+                self.result_ready.emit(blended_rgb.tobytes(), out_w, out_h, seq)
+            except Exception as e:
+                log.debug(f"BlendWorker: {e}")
 
-            composite_rgb = cv2.cvtColor(composite, cv2.COLOR_BGR2RGB)
 
-            height, width, channel = composite_rgb.shape
-            bytes_per_line = 3 * width
-            q_image = QImage(
-                composite_rgb.data, width, height, bytes_per_line, QImage.Format_RGB888
-            )
-            q_image = q_image.copy()
-            pixmap = QPixmap.fromImage(q_image)
-
-            self.composite_label.setPixmap(pixmap)
-
-        except Exception as e:
-            log.error(f"Failed to update composite: {e}", exc_info=True)
+# Simulator lives in raven_simulator; import only when not on device
+if not _IS_RAVEN_DEVICE:
+    from .raven_simulator import (
+        SimulatorBackgroundPreset,
+        SimulatorBackgroundWidget,
+        blend_frame,
+    )
+else:
+    SimulatorBackgroundWidget = None
+    SimulatorBackgroundPreset = None
 
 
 class RunApp(QMainWindow):
@@ -606,181 +325,474 @@ class RunApp(QMainWindow):
             raise ValueError(error_msg)
 
         super().__init__()
+        self.background_widget = None
         try:
             self.setWindowTitle("Raven App (alpha v0.1)")
-            self.setFixedSize(
-                int(APP_WINDOW_RESOLUTION[0]), int(APP_WINDOW_RESOLUTION[1])
+            total_window_width = APP_WINDOW_RESOLUTION[0]
+            total_window_height = APP_WINDOW_RESOLUTION[1]
+            total_window_height += (
+                CLIENT_DEVICE_ADDITIONAL_WINDOW_HEIGHT if not is_raven_device() else 0
             )
-            self.overlay_window = None  # Will be set later
-
+            self.setFixedSize(int(total_window_width), int(total_window_height))
             container = QWidget(self)
+            container.setStyleSheet("background-color: #1E1E1E;")
             layout = QVBoxLayout(container)
             layout.setContentsMargins(0, 0, 0, 0)
             layout.setSpacing(0)
 
-            app_widget.set_env_background_color("black")
-            app_widget.set_app_background_color("black")
-            app_widget.move(0, 0)
+            if not _IS_RAVEN_DEVICE:
+                # Merged window: additive blend of background + app (waveguide-style)
+                content_w = APP_WINDOW_RESOLUTION[0]
+                content_h = APP_WINDOW_RESOLUTION[1]
+                content_area = QWidget(container)
+                content_area.setFixedSize(content_w, content_h)
+                content_area.setAutoFillBackground(False)
 
-            layout.addWidget(app_widget, 1)  # Stretch factor 1 to take available space
-
-            button_container = QWidget(container)
-            button_layout = QHBoxLayout(button_container)
-            button_layout.setContentsMargins(10, 5, 10, 5)
-            button_layout.setSpacing(10)
-
-            self.simulator_button = QPushButton("Show Simulator", button_container)
-            self.simulator_button.setFixedHeight(40)
-            self.simulator_button.setMinimumWidth(150)
-            self.simulator_button.setAutoFillBackground(False)
-            self.simulator_button.setStyleSheet(
-                """
-                QPushButton {
-                    background-color: #2a2a2a;
-                    color: white;
-                    border: 2px solid #555;
-                    border-radius: 10px;
-                    font-size: 14px;
-                    font-weight: 600;
-                    padding: 5px 15px;
-                }
-                QPushButton:hover {
-                    background-color: #3a3a3a;
-                    border: 2px solid #777;
-                }
-                QPushButton:pressed {
-                    background-color: #1a1a1a;
-                    border: 2px solid #555;
-                }
-            """
-            )
-            self.simulator_button.setFlat(False)
-
-            def apply_rounded_mask():
-                path = QPainterPath()
-                path.addRoundedRect(self.simulator_button.rect(), 10, 10)
-                region = QRegion(path.toFillPolygon().toPolygon())
-                self.simulator_button.setMask(region)
-
-            self._apply_simulator_mask = apply_rounded_mask
-            self.simulator_button.clicked.connect(self.toggle_simulator)
-            QTimer.singleShot(0, apply_rounded_mask)
-            button_layout.addWidget(self.simulator_button)
-
-            self.background_buttons = []
-            button_style = """
-                QPushButton {
-                    background-color: rgba(30, 30, 30, 200);
-                    color: white;
-                    border: 2px solid rgba(255, 255, 255, 255);
-                    border-radius: 10px;
-                    font-size: 14px;
-                    font-weight: 600;
-                    padding: 5px 15px;
-                }
-                QPushButton:hover {
-                    background-color: rgba(50, 50, 50, 220);
-                    border: 2px solid rgba(255, 255, 255, 255);
-                }
-                QPushButton:pressed {
-                    background-color: rgba(70, 70, 70, 240);
-                    border: 2px solid rgba(255, 255, 255, 255);
-                }
-            """
-
-            for preset_enum in OverlayBackgroundPreset:
-                preset_str = preset_enum.value
-                button = QPushButton(preset_str.capitalize(), button_container)
-                button.setFixedSize(100, 40)
-                button.setAutoFillBackground(False)
-                button.setStyleSheet(button_style)
-                button.setFlat(False)
-
-                def apply_rounded_mask():
-                    path = QPainterPath()
-                    path.addRoundedRect(button.rect(), 10, 10)
-                    region = QRegion(path.toFillPolygon().toPolygon())
-                    button.setMask(region)
-
-                QTimer.singleShot(0, apply_rounded_mask)
-                button.clicked.connect(
-                    lambda checked, p=preset_str: self.change_background(p)
+                framework_dir = os.path.dirname(os.path.dirname(__file__))
+                self.background_widget = SimulatorBackgroundWidget(
+                    framework_dir, resolution=(content_w, content_h)
                 )
-                button.hide()
-                self.background_buttons.append(button)
-                button_layout.addWidget(button)
+                self.background_widget.setParent(content_area)
+                self.background_widget.setGeometry(0, 0, content_w, content_h)
+                # Keep background widget shown so its timer updates the label; composite covers it
 
-            button_layout.addStretch()
-            button_container.setFixedHeight(60)
-            layout.addWidget(button_container)
+                app_widget.set_env_background_color("black")
+                app_widget.set_app_background_color("black")
+                self._app_widget = app_widget
+                app_widget.setParent(content_area)
+                app_widget.setGeometry(0, 0, content_w, content_h)
+                # Invisible but receives events and repaints (for grab); clicks pass through composite to here
+                opacity = QGraphicsOpacityEffect(app_widget)
+                opacity.setOpacity(0.0)
+                app_widget.setGraphicsEffect(opacity)
+
+                self._composite_label = QLabel(content_area)
+                self._composite_label.setGeometry(0, 0, content_w, content_h)
+                self._composite_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                self._composite_label.setScaledContents(True)
+                self._composite_label.setAttribute(Qt.WA_TransparentForMouseEvents)
+                self._composite_label.raise_()
+
+                self._composite_timer = QTimer(self)
+                self._composite_timer.timeout.connect(self._update_composite)
+                interval = (
+                    int(1000 / OVERLAY_FRAME_RATE) if OVERLAY_FRAME_RATE > 0 else 33
+                )
+                self._composite_timer.start(interval)
+                QTimer.singleShot(0, self._update_composite)
+
+                self._blend_queue = queue.Queue(maxsize=1)
+                self._blend_sequence = 0
+                self._blend_last_sent = -1
+                self._composite_grab_pending = False
+                get_bg_fn = lambda: (
+                    self.background_widget.get_latest_background()
+                    if self.background_widget is not None
+                    else None
+                )
+                self._blend_worker = _BlendWorker(self._blend_queue, get_bg_fn)
+                self._blend_thread = QThread(self)
+                self._blend_worker.moveToThread(self._blend_thread)
+                self._blend_thread.started.connect(self._blend_worker.process_loop)
+                self._blend_worker.result_ready.connect(self._on_blend_result)
+                self._blend_thread.start()
+
+                self._timing_total_ms: List[float] = []
+                self._last_put_time: Optional[float] = None
+                self._timing_report_timer = QTimer(self)
+                self._timing_report_timer.setInterval(3000)
+                self._timing_report_timer.timeout.connect(self._print_timing_averages)
+                self._timing_report_timer.start(3000)
+
+                self._raw_mode = False
+                self._raw_update_timer = QTimer(self)
+                self._raw_update_timer.timeout.connect(self._update_raw_composite)
+
+                layout.addWidget(content_area, 1)
+
+                button_container = QWidget(container)
+                button_layout = QHBoxLayout(button_container)
+                button_layout.setContentsMargins(10, 8, 10, 8)
+                button_layout.setSpacing(12)
+
+                self._mode_buttons_glass = """
+                    QPushButton {
+                        background-color: rgba(255, 255, 255, 0.12);
+                        color: rgba(255, 255, 255, 0.95);
+                        border: 1px solid rgba(255, 255, 255, 0.25);
+                        border-radius: 12px;
+                        font-size: 13px;
+                        font-weight: 600;
+                        padding: 6px 14px;
+                    }
+                    QPushButton:hover {
+                        background-color: rgba(255, 255, 255, 0.18);
+                        border: 1px solid rgba(255, 255, 255, 0.35);
+                    }
+                    QPushButton:pressed {
+                        background-color: rgba(255, 255, 255, 0.22);
+                        border: 1px solid rgba(255, 255, 255, 0.4);
+                    }
+                """
+                self._mode_buttons_active = """
+                    QPushButton {
+                        background-color: rgba(255, 255, 255, 0.28);
+                        color: white;
+                        border: 1px solid rgba(255, 255, 255, 0.6);
+                        border-radius: 12px;
+                        font-size: 13px;
+                        font-weight: 600;
+                        padding: 6px 14px;
+                    }
+                    QPushButton:hover {
+                        background-color: rgba(255, 255, 255, 0.32);
+                        border: 1px solid rgba(255, 255, 255, 0.7);
+                    }
+                    QPushButton:pressed {
+                        background-color: rgba(255, 255, 255, 0.35);
+                        border: 1px solid rgba(255, 255, 255, 0.8);
+                    }
+                """
+
+                self._active_mode = "night"
+                self._mode_buttons = []
+
+                button_layout.addStretch()
+                raw_button = QPushButton("Raw", button_container)
+                raw_button.setFixedSize(92, 42)
+                raw_button.setProperty("mode_id", "raw")
+                raw_button.clicked.connect(self._on_raw_button_clicked)
+                self._mode_buttons.append(("raw", raw_button))
+                button_layout.addWidget(raw_button)
+
+                self._raw_tooltip = self._make_raw_tooltip()
+                self._raw_tooltip_button = raw_button
+                raw_button.installEventFilter(self)
+
+                self.background_buttons = []
+                for preset_enum in SimulatorBackgroundPreset:
+                    preset_str = preset_enum.value
+                    button = QPushButton(preset_str.capitalize(), button_container)
+                    button.setFixedSize(92, 42)
+                    button.setProperty("mode_id", preset_str)
+                    button.clicked.connect(
+                        lambda checked, p=preset_str: self.change_background(p)
+                    )
+                    self.background_buttons.append(button)
+                    self._mode_buttons.append((preset_str, button))
+                    button_layout.addWidget(button)
+
+                button_layout.addStretch()
+                button_container.setFixedHeight(58)
+                layout.addWidget(button_container)
+
+                self._update_mode_button_styles()
+            else:
+                self.background_buttons = []
+                app_widget.set_env_background_color("black")
+                app_widget.set_app_background_color("black")
+                app_widget.move(0, 0)
+                layout.addWidget(app_widget, 1)
 
             self.setCentralWidget(container)
-            set_custom_circle_cursor(app_widget)
+            if not _IS_RAVEN_DEVICE:
+                set_custom_circle_cursor(self._app_widget)
+            else:
+                set_custom_circle_cursor(app_widget)
 
             log.info("RunApp initialized successfully.")
         except Exception as e:
             log.error(f"Failed to initialize RunApp: {e}", exc_info=True)
             raise
 
-    def set_overlay_window(self, overlay_window) -> None:
-        """Set the overlay window reference for the simulator button."""
-        self.overlay_window = overlay_window
-        if overlay_window:
-            original_close_event = overlay_window.closeEvent
+    def _app_grab_to_bytes(self, app_pix: QPixmap):
+        """Copy app pixmap to RGB bytes. Uses shared utils.qimage_to_rgb_bytes (no PNG)."""
+        if app_pix.isNull():
+            print("[RunApp] _app_grab_to_bytes: app_pix.isNull()", flush=True)
+            log.error("_app_grab_to_bytes: app_pix is null", extra={"console": True})
+            return None
+        img = app_pix.toImage()
+        if img.width() <= 0 or img.height() <= 0:
+            print(
+                f"[RunApp] _app_grab_to_bytes: invalid size w={img.width()} h={img.height()}",
+                flush=True,
+            )
+            log.error(
+                f"_app_grab_to_bytes: invalid size w={img.width()} h={img.height()}",
+                extra={"console": True},
+            )
+            return None
+        from ..helpers.utils import qimage_to_rgb_bytes
 
-            def close_event_handler(event):
-                # Stop the timer when window is closed
-                if (
-                    hasattr(overlay_window, "update_timer")
-                    and overlay_window.update_timer.isActive()
-                ):
-                    overlay_window.update_timer.stop()
-                self.simulator_button.setText("Show Simulator")
-                for button in self.background_buttons:
-                    button.hide()
-                original_close_event(event)
+        result = qimage_to_rgb_bytes(img)
+        if result is None:
+            log.error(
+                "_app_grab_to_bytes: qimage_to_rgb_bytes failed",
+                extra={"console": True},
+            )
+            return None
+        return result
 
-            overlay_window.closeEvent = close_event_handler
+    def _update_composite(self) -> None:
+        """Request a composite update: defer grab to next event loop tick to avoid QPainter re-entry when switching background."""
+        if self.background_widget is None or not hasattr(self, "_composite_label"):
+            return
+        if getattr(self, "_raw_mode", False):
+            return
+        if getattr(self, "_composite_grab_pending", False):
+            return
+        self._composite_grab_pending = True
+        QTimer.singleShot(0, self._deferred_composite_grab)
+
+    def _deferred_composite_grab(self) -> None:
+        """Run in next event loop tick: grab app UI and enqueue for blend. Avoids painting while device is busy (e.g. after background switch)."""
+        self._composite_grab_pending = False
+        if self.background_widget is None or not hasattr(self, "_composite_label"):
+            return
+        if getattr(self, "_raw_mode", False):
+            return
+        self._app_widget.setGraphicsEffect(None)
+        try:
+            app_pix = self._app_widget.grab()
+        finally:
+            opacity = QGraphicsOpacityEffect(self._app_widget)
+            opacity.setOpacity(0.0)
+            self._app_widget.setGraphicsEffect(opacity)
+        result = self._app_grab_to_bytes(app_pix)
+        if result is None:
+            log.debug("_deferred_composite_grab: _app_grab_to_bytes returned None")
+            return
+        app_bytes, w, h = result
+        try:
+            seq = self._blend_sequence
+            self._blend_sequence += 1
+            self._last_put_time = time.perf_counter()
+            self._blend_queue.put_nowait(
+                (app_bytes, w, h, seq, DEFAULT_OVERLAY_BRIGHTNESS)
+            )
+            self._blend_last_sent = seq
+        except queue.Full:
+            pass
+
+    def _on_blend_result(self, rgb_bytes: bytes, w: int, h: int, seq: int) -> None:
+        """Main-thread slot: apply blended image only if it matches latest sent (discard stale)."""
+        if not hasattr(self, "_composite_label"):
+            return
+        if seq != getattr(self, "_blend_last_sent", -2):
+            return
+        if (
+            PRINT_SIMULATOR_PERFORMANCE
+            and hasattr(self, "_last_put_time")
+            and self._last_put_time is not None
+        ):
+            total_ms = (time.perf_counter() - self._last_put_time) * 1000
+            self._timing_total_ms.append(total_ms)
+        try:
+            q_img = QImage(
+                rgb_bytes,
+                w,
+                h,
+                3 * w,
+                QImage.Format.Format_RGB888,
+            )
+            self._composite_label.setPixmap(QPixmap.fromImage(q_img.copy()))
+        except Exception as e:
+            log.debug(f"Blend result apply: {e}")
+
+    def _print_timing_averages(self) -> None:
+        """Print total time and expected fps/ms per frame every 3s (simulator mode only)."""
+        if not PRINT_SIMULATOR_PERFORMANCE:
+            return
+        if getattr(self, "_raw_mode", True):
+            return
+        total_list = getattr(self, "_timing_total_ms", None)
+        if not total_list or len(total_list) == 0:
+            return
+        n = len(total_list)
+        avg_total_ms = sum(total_list) / n
+        expected_fps = OVERLAY_FRAME_RATE
+        expected_ms_per_frame = 1000.0 / expected_fps if expected_fps > 0 else 0
+        print(
+            f"[Simulator timing] (last 3s, n={n}) "
+            f"total={avg_total_ms:.2f}ms expected_ms_per_frame={expected_ms_per_frame:.2f}ms ({expected_fps}fps)"
+        )
+        self._timing_total_ms.clear()
+
+    def _update_raw_composite(self) -> None:
+        """Grab app widget and show it on the composite label (raw mode only; no blend)."""
+        if not getattr(self, "_raw_mode", False):
+            return
+        self._app_widget.setGraphicsEffect(None)
+        try:
+            app_pix = self._app_widget.grab()
+        finally:
+            opacity = QGraphicsOpacityEffect(self._app_widget)
+            opacity.setOpacity(1.0)
+            self._app_widget.setGraphicsEffect(opacity)
+        if not app_pix.isNull():
+            self._composite_label.setPixmap(app_pix)
+
+    def _set_raw_view(self, raw: bool) -> None:
+        """Show only the app UI (raw) or the blended overlay (simulator)."""
+        if not hasattr(self, "_raw_mode"):
+            return
+        self._raw_mode = raw
+        content_area = self._app_widget.parent()
+        if raw:
+            self._active_mode = "raw"
+            self._update_mode_button_styles()
+            self._composite_timer.stop()
+            self._composite_label.setPixmap(QPixmap())
+            self._composite_label.clear()
+            self.background_widget.stackUnder(self._app_widget)
+            self._composite_label.stackUnder(self._app_widget)
+            raw_opacity = QGraphicsOpacityEffect(self._app_widget)
+            raw_opacity.setOpacity(1.0)
+            self._app_widget.setGraphicsEffect(raw_opacity)
+            if content_area is not None:
+                content_area.setAutoFillBackground(True)
+                content_area.setStyleSheet("background-color: #282936;")
+            self._app_widget.raise_()
+            self._composite_label.raise_()
+            self._app_widget.show()
+            interval = int(1000 / OVERLAY_FRAME_RATE) if OVERLAY_FRAME_RATE > 0 else 33
+            self._raw_update_timer.start(interval)
+            QTimer.singleShot(0, self._update_raw_composite)
+            QApplication.processEvents()
+        else:
+            self._raw_update_timer.stop()
+            self._active_mode = (
+                self.background_widget.current_preset.value
+                if self.background_widget is not None
+                else "night"
+            )
+            self._update_mode_button_styles()
+            if content_area is not None:
+                content_area.setAutoFillBackground(False)
+                content_area.setStyleSheet("")
+            opacity = QGraphicsOpacityEffect(self._app_widget)
+            opacity.setOpacity(0.0)
+            self._app_widget.setGraphicsEffect(opacity)
+            self.background_widget.show()
+            self._composite_label.show()
+            self._composite_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            self._composite_label.setPixmap(QPixmap())
+            self.background_widget.stackUnder(self._app_widget)
+            self._app_widget.stackUnder(self._composite_label)
+            self._composite_label.raise_()
+            interval = int(1000 / OVERLAY_FRAME_RATE) if OVERLAY_FRAME_RATE > 0 else 33
+            self._composite_timer.start(interval)
+            QTimer.singleShot(0, self._update_composite)
+            self._composite_label.update()
+            QApplication.processEvents()
+
+    def _toggle_raw_view(self) -> None:
+        """Toggle between raw app UI and blended simulator overlay."""
+        self._set_raw_view(not self._raw_mode)
+
+    def _make_raw_tooltip(self) -> QFrame:
+        """Styled tooltip for Raw button: appears above, bigger, glass-style."""
+        tip = QFrame(self)
+        tip.setWindowFlags(Qt.ToolTip | Qt.FramelessWindowHint)
+        tip.setAttribute(Qt.WA_TranslucentBackground, True)
+        tip.setStyleSheet(
+            """
+            QFrame {
+                background-color: rgba(30, 30, 30, 0.85);
+                border: 1px solid rgba(255, 255, 255, 0.18);
+                border-radius: 12px;
+            }
+        """
+        )
+        tip_label = QLabel(tip)
+        tip_label.setWordWrap(True)
+        tip_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        tip_label.setText(RAW_MODE_TOOLTIP_TEXT)
+        tip_label.setStyleSheet(
+            """
+            QLabel {
+                color: rgba(255, 255, 255, 0.92);
+                font-size: 14px;
+                line-height: 1.35;
+                padding: 18px 12px;
+            }
+        """
+        )
+        tip_label.setMinimumWidth(260)
+        tip_label.setMaximumWidth(320)
+        tip_layout = QVBoxLayout(tip)
+        tip_layout.setContentsMargins(0, 0, 0, 0)
+        tip_layout.addWidget(tip_label)
+        tip.adjustSize()
+        tip.hide()
+        return tip
+
+    def eventFilter(self, obj, event) -> bool:
+        """Show Raw tooltip above button on hover; hide on leave."""
+        if obj is getattr(self, "_raw_tooltip_button", None):
+            if event.type() == QEvent.Type.Enter:
+                tip = getattr(self, "_raw_tooltip", None)
+                if tip is not None:
+                    tip.adjustSize()
+                    btn = self._raw_tooltip_button
+                    global_pos = btn.mapToGlobal(QPoint(0, 0))
+                    x = global_pos.x() + (btn.width() - tip.width()) // 2
+                    y = global_pos.y() - tip.height() - 0.1
+                    tip.move(x, y)
+                    tip.show()
+                    tip.raise_()
+            elif event.type() == QEvent.Type.Leave:
+                tip = getattr(self, "_raw_tooltip", None)
+                if tip is not None:
+                    tip.hide()
+        return super().eventFilter(obj, event)
+
+    def _update_mode_button_styles(self) -> None:
+        """Apply glass style; highlight the button matching _active_mode."""
+        if not hasattr(self, "_mode_buttons"):
+            return
+        for mode_id, btn in self._mode_buttons:
+            style = (
+                self._mode_buttons_active
+                if mode_id == self._active_mode
+                else self._mode_buttons_glass
+            )
+            btn.setStyleSheet(style)
+            btn.setAutoFillBackground(False)
+            btn.setFlat(False)
+
+    def _on_raw_button_clicked(self) -> None:
+        """Raw button: set active mode and toggle raw view."""
+        self._active_mode = "raw"
+        self._update_mode_button_styles()
+        self._toggle_raw_view()
 
     def change_background(self, preset: str) -> None:
-        """Change the background preset of the overlay window."""
-        if self.overlay_window is None:
-            return
-        self.overlay_window.change_background(preset)
+        """Change the background preset of the embedded simulator background."""
+        if hasattr(self, "_raw_mode") and self._raw_mode:
+            self._set_raw_view(False)
+        self._active_mode = preset
+        self._update_mode_button_styles()
+        if self.background_widget is not None:
+            self.background_widget.change_background(preset)
 
-    def toggle_simulator(self) -> None:
-        """Toggle the visibility of the simulator overlay window."""
-        if self.overlay_window is None:
-            return
-
-        if self.overlay_window.isVisible():
-            self.overlay_window.hide()
-            # Pause the timer when simulator is hidden
-            if (
-                hasattr(self.overlay_window, "update_timer")
-                and self.overlay_window.update_timer.isActive()
-            ):
-                self.overlay_window.update_timer.stop()
-            self.simulator_button.setText("Show Simulator")
-            for button in self.background_buttons:
-                button.hide()
-        else:
-            self.overlay_window.show()
-            # Resume the timer when simulator is shown
-            if (
-                hasattr(self.overlay_window, "update_timer")
-                and not self.overlay_window.update_timer.isActive()
-            ):
-                self.overlay_window.update_timer.start()
-            self.simulator_button.setText("Hide Simulator")
-            for button in self.background_buttons:
-                button.show()
-
-    def _sync_button_state(self) -> None:
-        """Update button text and visibility to match window state."""
-        self.simulator_button.setText("Show Simulator")
-        for button in self.background_buttons:
-            button.hide()
+    def closeEvent(self, event) -> None:
+        """Stop timers and worker threads gracefully before closing the window."""
+        if hasattr(self, "_composite_timer") and self._composite_timer.isActive():
+            self._composite_timer.stop()
+        if hasattr(self, "_raw_update_timer") and self._raw_update_timer.isActive():
+            self._raw_update_timer.stop()
+        if self.background_widget is not None:
+            self.background_widget.stop()
+        if hasattr(self, "_blend_queue") and hasattr(self, "_blend_thread"):
+            try:
+                self._blend_queue.put(None, timeout=2)
+            except queue.Full:
+                pass
+            if self._blend_thread.isRunning():
+                self._blend_thread.quit()
+                self._blend_thread.wait(5000)
+        super().closeEvent(event)
 
     @staticmethod
     def run(
@@ -789,8 +801,6 @@ class RunApp(QMainWindow):
         app_key: str = "",
         use_async_loop: bool = False,
         show_overlayed_window: bool = True,
-        overlay_resolution: tuple[int, int] = OVERLAY_RESOLUTION,
-        overlay_brightness: float = DEFAULT_OVERLAY_BRIGHTNESS,
         should_preload_fonts: bool = False,
     ) -> None:
         """
@@ -808,161 +818,41 @@ class RunApp(QMainWindow):
                 to support async/await operations. Defaults to False.
             show_overlayed_window (bool): If True, captures the widget every second and saves
                 it to assets/widget_snapshot.png. Defaults to True.
-            overlay_resolution (tuple[int, int]): Resolution of the overlay window (width, height).
-                Defaults to OVERLAY_RESOLUTION (800, 900).
-            overlay_brightness (float): Brightness multiplier for the snapshot in additive blending.
-                1.0 = normal, <1.0 = dimmer, >1.0 = brighter. Defaults to 1.0.
             should_preload_fonts (bool): If True, preloads fonts after QApplication is created.
                 Defaults to False.
         """
 
         args = sys.argv[1:]
         log.info(f"Command-line args: {args}")
-        if len(args) > 0 and (args[0] == "deploy" or args[0] == "deploy-pyc"):
-            if not ACCEPTING_DEPLOYMENTS:
-                error_msg = "Not accepting deployments right now, contact Raven team to get access"
-                log.warning(error_msg)
-                print(f"{error_msg}", file=sys.stdout)
-                return
-            if app_id == "":
-                error_msg = "Please add app_id to function call"
-                log.error(error_msg)
-                print(f"ERROR: {error_msg}", file=sys.stderr)
-                return
-            elif app_key == "":
-                error_msg = "Please add app_key to function call"
-                log.error(error_msg)
-                print(f"ERROR: {error_msg}", file=sys.stderr)
-                return
-            else:
-                compile_pyc = args[0] == "deploy-pyc"
-                log.info(
-                    f"Deployment mode: {'compiled (.pyc)' if compile_pyc else 'source (.py)'}"
-                )
 
-                build_path = RunApp.deploy_app(compile_pyc=compile_pyc)
-                if build_path:
-                    log.info(f"Build path: {build_path}")
-                    print(f"Build path: {build_path}", file=sys.stdout)
-                else:
-                    error_msg = "Failed to create build package, cannot upload"
-                    log.error(error_msg)
-                    print(f"ERROR: {error_msg}", file=sys.stderr)
-                    return
-
-                data = {"app_id": app_id, "app_key": app_key}
-
-                developer_end_point = f"{BASE_API_URL}/rest/api/developer/run/app/"
-                print("Uploading package...", file=sys.stdout)
-                with open(build_path, "rb") as build_file:
-                    files = {"rav_build": build_file}
-                    response = requests.post(
-                        url=developer_end_point, data=data, files=files
-                    )
-
-                upload_msg = f"Upload response status: {response.status_code}"
-                log.info(upload_msg)
-                if response.status_code == 200:
-                    print(f"{upload_msg} - Upload successful!", file=sys.stdout)
-                else:
-                    print(f"{upload_msg} - Upload failed!", file=sys.stderr)
-                return
+        if len(args) > 0 and args[0] in ("deploy", "deploy-pyc"):
+            _handle_deploy(args, app_id, app_key)
+            return
 
         try:
             if app_widget_fn is None:
                 error_msg = "app_widget_fn cannot be None"
                 log.error(error_msg, extra={"console": True})
                 raise ValueError(error_msg)
-
             if not callable(app_widget_fn):
                 error_msg = f"app_widget_fn must be callable, got {type(app_widget_fn).__name__}"
                 log.error(error_msg, extra={"console": True})
                 raise ValueError(error_msg)
 
             app = QApplication(sys.argv)
-
-            # Set up Qt exception handler to catch unhandled exceptions in Qt slots/callbacks
-            def qt_exception_handler(exc_type, exc_value, exc_traceback):
-                """Handle unhandled exceptions in Qt event loop."""
-                if issubclass(exc_type, KeyboardInterrupt):
-                    sys.__excepthook__(exc_type, exc_value, exc_traceback)
-                    return
-
-                error_msg = "".join(
-                    traceback.format_exception(exc_type, exc_value, exc_traceback)
-                )
-                print("\n" + "=" * 80, file=sys.stderr)
-                print(
-                    "ERROR: Unhandled exception in your application!", file=sys.stderr
-                )
-                print("=" * 80, file=sys.stderr)
-                print(error_msg, file=sys.stderr)
-                print("=" * 80 + "\n", file=sys.stderr)
-                log.error(
-                    f"Unhandled exception in application: {exc_value}", exc_info=True
-                )
-                sys.exit(1)
-
-            # Install exception handler
-            sys.excepthook = qt_exception_handler
+            sys.excepthook = _qt_exception_handler
 
             if should_preload_fonts:
-                try:
-                    preload_fonts()
-                except Exception as e:
-                    error_msg = f"Failed to preload fonts: {e}"
-                    print(f"ERROR: {error_msg}", file=sys.stderr)
-                    traceback.print_exc()
-                    log.error(error_msg, exc_info=True)
-                    raise
+                preload_fonts()
 
-            # Call app widget function with error handling
-            try:
-                app_widget = app_widget_fn()
-            except Exception as e:
-                error_msg = f"Failed to create app widget: {e}"
-                print("\n" + "=" * 80, file=sys.stderr)
-                print("ERROR: Failed to create your application!", file=sys.stderr)
-                print("=" * 80, file=sys.stderr)
-                print(f"Exception: {type(e).__name__}: {e}", file=sys.stderr)
-                print("\nFull traceback:", file=sys.stderr)
-                traceback.print_exc()
-                print("=" * 80 + "\n", file=sys.stderr)
-                log.error(error_msg, exc_info=True)
-                raise
-
+            app_widget = app_widget_fn()
             if app_widget is None:
                 error_msg = "App widget function returned None"
                 print(f"ERROR: {error_msg}", file=sys.stderr)
                 log.error(error_msg, extra={"console": True})
                 raise ValueError(error_msg)
 
-            log.info("RAVEN APP READY LAUNCH SIGNAL", extra={"console": True})
-            if is_raven_device():
-                try:
-                    from ..socket_managers.app_launch import send_app_launched
-                    send_app_launched(app_id=app_id, pid=os.getpid())
-                except Exception as e:
-                    log.warning(f"Failed to notify launcher that app launched: {e}")
-                    pass
-
-            # Create window with error handling
-            try:
-                window = RunApp(app_widget)
-            except Exception as e:
-                error_msg = f"Failed to create RunApp window: {e}"
-                print("\n" + "=" * 80, file=sys.stderr)
-                print(
-                    "ERROR: Failed to initialize application window!", file=sys.stderr
-                )
-                print("=" * 80, file=sys.stderr)
-                print(f"Exception: {type(e).__name__}: {e}", file=sys.stderr)
-                print("\nFull traceback:", file=sys.stderr)
-                traceback.print_exc()
-                print("=" * 80 + "\n", file=sys.stderr)
-                log.error(error_msg, exc_info=True)
-                raise
-
+            window = RunApp(app_widget)
             if is_raven_device():
                 window.setWindowFlags(Qt.FramelessWindowHint)
             window.show()
@@ -970,154 +860,65 @@ class RunApp(QMainWindow):
             log.info("Application started.")
 
             if not is_raven_device() and show_overlayed_window:
-                widget_name = app_widget.__class__.__name__
-                snapshot_filename = f"{widget_name}_{SNAPSHOT_FILENAME}"
-
+                snapshot_filename = f"{app_id}_{SNAPSHOT_FILENAME}"
                 assets_dir = os.path.join(os.path.dirname(__file__), "..", "assets")
                 os.makedirs(assets_dir, exist_ok=True)
-
                 tmp_dir = os.path.join(assets_dir, SNAPSHOT_TMP_DIR)
                 os.makedirs(tmp_dir, exist_ok=True)
                 snapshot_path = os.path.join(tmp_dir, snapshot_filename)
+                _cleanup_snapshot_tmp(snapshot_path, tmp_dir)
 
-                def cleanup_snapshot_tmp():
-                    """Remove the snapshot file on process exit, and tmp dir if empty."""
-                    try:
-                        if os.path.exists(snapshot_path):
-                            os.remove(snapshot_path)
-                            log.info(f"Cleaned up snapshot file: {snapshot_path}")
+                from functools import partial
 
-                        if os.path.exists(tmp_dir):
-                            try:
-                                if not os.listdir(tmp_dir):
-                                    os.rmdir(tmp_dir)
-                                    log.info(f"Removed empty tmp directory: {tmp_dir}")
-                            except OSError:
-                                pass
-                    except Exception as e:
-                        log.warning(f"Failed to cleanup snapshot file: {e}")
-
-                atexit.register(cleanup_snapshot_tmp)
-
-                def signal_handler(signum, frame):
-                    """Handle termination signals."""
-                    cleanup_snapshot_tmp()
-                    sys.exit(0)
-
-                signal.signal(signal.SIGTERM, signal_handler)
-                signal.signal(signal.SIGINT, signal_handler)
-
-                snapshot_thread_active = False
-
-                def save_snapshot_in_background(image: QImage, path: str):
-                    """Save image to disk in background (keeps main thread light)."""
-                    nonlocal snapshot_thread_active
-                    try:
-                        image = image.copy()  # copy in worker so main thread does less
-                        temp_path = path + ".tmp"
-                        image.save(temp_path, "PNG")
-                        os.replace(temp_path, path)
-                    except Exception as e:
-                        log.error(f"Failed to save widget snapshot: {e}")
-                        temp_path = path + ".tmp"
-                        if os.path.exists(temp_path):
-                            try:
-                                os.remove(temp_path)
-                            except Exception:
-                                pass
-                    finally:
-                        snapshot_thread_active = False
-
-                def capture_widget_snapshot():
-                    """Grab once on main thread, copy to QImage, then do all heavy work in background."""
-                    nonlocal snapshot_thread_active
-                    try:
-                        if snapshot_thread_active:
-                            return
-                        # Main thread: only grab + active check; copy done in worker
-                        pixmap = app_widget.grab()
-                        image = pixmap.toImage()
-                        snapshot_thread_active = True
-                        threading.Thread(
-                            target=save_snapshot_in_background,
-                            args=(image, snapshot_path),
-                            daemon=True,
-                        ).start()
-                    except Exception as e:
-                        log.error(f"Failed to capture widget snapshot: {e}")
-                        snapshot_thread_active = False
-
-                snapshot_timer = QTimer()
-                snapshot_timer.timeout.connect(capture_widget_snapshot)
-                cast_fps = CAST_FRAME_RATE_NON_RAVEN_DEVICE
-                if cast_fps <= 0:
-                    error_msg = (
-                        f"CAST_FRAME_RATE_NON_RAVEN_DEVICE must be positive, got {cast_fps}"
-                    )
-                    log.error(error_msg, extra={"console": True})
-                    raise ValueError(error_msg)
-                timer_interval = int(1000 / cast_fps)
-                snapshot_timer.start(timer_interval)
-                capture_widget_snapshot()
-                log.info(f"Widget snapshot capture enabled (every {timer_interval}ms)")
-
-                framework_dir = os.path.dirname(os.path.dirname(__file__))
-
-                overlay_window = OverlayWidget(
-                    snapshot_path,
-                    framework_dir,
-                    overlay_resolution,
-                    overlay_brightness,
+                atexit.register(partial(_cleanup_snapshot_tmp, snapshot_path, tmp_dir))
+                signal.signal(
+                    signal.SIGTERM,
+                    _make_snapshot_signal_handler(snapshot_path, tmp_dir),
                 )
-                overlay_window.move(
-                    SIMULATOR_WINDOW_POSITION[0], SIMULATOR_WINDOW_POSITION[1]
-                )  # Position it next to the main window
-                window.set_overlay_window(overlay_window)
-                overlay_window.hide()  # Start hidden, user can show it with the button
+                signal.signal(
+                    signal.SIGINT,
+                    _make_snapshot_signal_handler(snapshot_path, tmp_dir),
+                )
+
+                snapshot_thread_active_ref: List[bool] = [False]
+                overlay_fps = OVERLAY_FRAME_RATE if OVERLAY_FRAME_RATE > 0 else 15
+                timer_interval = int(1000 / overlay_fps)
+                snapshot_timer = QTimer()
+                snapshot_timer.timeout.connect(
+                    partial(
+                        _capture_widget_snapshot,
+                        app_widget,
+                        snapshot_path,
+                        snapshot_thread_active_ref,
+                    )
+                )
+                snapshot_timer.start(timer_interval)
+                _capture_widget_snapshot(
+                    app_widget,
+                    snapshot_path,
+                    snapshot_thread_active_ref,
+                )
+
+                log.info(f"Widget snapshot capture enabled (every {timer_interval}ms)")
                 log.info(
-                    "Overlay window created (hidden by default, use 'Show Simulator' button to display)"
+                    "Merged window: display background with transparent app on top (use preset buttons to change background)"
                 )
 
             if use_async_loop:
+                import asyncio
+
                 from qasync import QEventLoop
 
                 loop = QEventLoop(app)
                 asyncio.set_event_loop(loop)
                 log.info("Using async event loop")
-                try:
-                    with loop:
-                        loop.run_forever()
-                except Exception as e:
-                    error_msg = f"Error in async event loop: {e}"
-                    print("\n" + "=" * 80, file=sys.stderr)
-                    print("ERROR: Exception in async event loop!", file=sys.stderr)
-                    print("=" * 80, file=sys.stderr)
-                    print(f"Exception: {type(e).__name__}: {e}", file=sys.stderr)
-                    print("\nFull traceback:", file=sys.stderr)
-                    traceback.print_exc()
-                    print("=" * 80 + "\n", file=sys.stderr)
-                    log.error(error_msg, exc_info=True)
-                    raise
+                with loop:
+                    loop.run_forever()
             else:
                 log.info("About to start app.exec()")
-                try:
-                    ret = app.exec()
-                    log.info(f"Qt event loop exited with code: {ret}")
-                    sys.exit(ret)
-                except Exception as e:
-                    error_msg = f"Error during Qt event loop execution: {e}"
-                    print("\n" + "=" * 80, file=sys.stderr)
-                    print(
-                        "ERROR: Exception during application execution!",
-                        file=sys.stderr,
-                    )
-                    print("=" * 80, file=sys.stderr)
-                    print(f"Exception: {type(e).__name__}: {e}", file=sys.stderr)
-                    print("\nFull traceback:", file=sys.stderr)
-                    traceback.print_exc()
-                    print("=" * 80 + "\n", file=sys.stderr)
-                    log.error(error_msg, exc_info=True)
-                    raise
+                ret = app.exec()
+                log.info(f"Qt event loop exited with code: {ret}")
+                sys.exit(ret)
         except KeyboardInterrupt:
             log.info("Application interrupted by user")
             print("\nApplication interrupted by user (Ctrl+C)", file=sys.stderr)
@@ -1134,513 +935,308 @@ class RunApp(QMainWindow):
             log.error(error_msg, exc_info=True)
             sys.exit(1)
 
-    @staticmethod
-    def _load_ravignore(app_path: str) -> List[str]:
-        """
-        Load patterns from .ravignore file.
+    if not _IS_RAVEN_DEVICE:
 
-        Args:
-            app_path (str): Path to the app directory.
+        @staticmethod
+        def _load_ravignore(app_path: str) -> List[str]:
+            ravignore_path = os.path.join(app_path, ".ravignore")
+            if not os.path.exists(ravignore_path):
+                return []
+            patterns = []
+            with open(ravignore_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        patterns.append(line)
+            if patterns:
+                log.info(f"Loaded {len(patterns)} patterns from .ravignore")
+            return patterns
 
-        Returns:
-            List[str]: List of ignore patterns (empty list if file doesn't exist).
-        """
-        ravignore_path = os.path.join(app_path, ".ravignore")
-        if not os.path.exists(ravignore_path):
-            return []
-
-        patterns = []
-        with open(ravignore_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    patterns.append(line)
-
-        if patterns:
-            log.info(f"Loaded {len(patterns)} patterns from .ravignore")
-        return patterns
-
-    @staticmethod
-    def _should_ignore_path(rel_path: str, ignore_patterns: List[str]) -> bool:
-        """
-        Check if a relative path should be ignored based on .ravignore patterns.
-        Also filters directories during os.walk.
-
-        Simple matching: path is ignored if it starts with any pattern or equals it.
-
-        Args:
-            rel_path (str): Relative path from app root (e.g., "examples/hello.py").
-            ignore_patterns (List[str]): List of ignore patterns from .ravignore.
-
-        Returns:
-            bool: True if path should be ignored, False otherwise.
-        """
-        if not ignore_patterns:
+        @staticmethod
+        def _should_ignore_path(rel_path: str, ignore_patterns: List[str]) -> bool:
+            if not ignore_patterns:
+                return False
+            rel_path = rel_path.replace("\\", "/")
+            if rel_path.startswith("./"):
+                rel_path = rel_path[2:]
+            for pattern in ignore_patterns:
+                pattern = pattern.replace("\\", "/")
+                if pattern.startswith("./"):
+                    pattern = pattern[2:]
+                pattern_clean = pattern.rstrip("/")
+                rel_path_clean = rel_path.rstrip("/")
+                if rel_path_clean == pattern_clean or rel_path_clean.startswith(
+                    pattern_clean + "/"
+                ):
+                    return True
             return False
 
-        rel_path = rel_path.replace("\\", "/")
-        if rel_path.startswith("./"):
-            rel_path = rel_path[2:]
-
-        for pattern in ignore_patterns:
-            pattern = pattern.replace("\\", "/")
-            if pattern.startswith("./"):
-                pattern = pattern[2:]
-
-            pattern_clean = pattern.rstrip("/")
-            rel_path_clean = rel_path.rstrip("/")
-
-            if rel_path_clean == pattern_clean or rel_path_clean.startswith(
-                pattern_clean + "/"
-            ):
-                return True
-
-        return False
-
-    @staticmethod
-    def _filter_walk_iteration(
-        root: str, dirs: List[str], app_path: str, ignore_patterns: List[str]
-    ) -> bool:
-        """
-        Filter directories during os.walk iteration and check if current root should be skipped.
-
-        Modifies dirs list in place to remove ignored directories.
-
-        Args:
-            root (str): Current root directory from os.walk.
-            dirs (List[str]): List of directory names (modified in place).
-            app_path (str): Base app path for calculating relative paths.
-            ignore_patterns (List[str]): List of ignore patterns from .ravignore.
-
-        Returns:
-            bool: True if current root directory should be skipped, False otherwise.
-        """
-        rel_root = os.path.relpath(root, app_path)
-        if rel_root == ".":
-            rel_root = ""
-
-        filtered_dirs = []
-        for d in dirs:
-            if d == "__pycache__":
-                continue
-            dir_rel_path = (
-                os.path.join(rel_root, d).replace("\\", "/") if rel_root else d
-            )
-            if not RunApp._should_ignore_path(dir_rel_path, ignore_patterns):
-                filtered_dirs.append(d)
-        dirs[:] = filtered_dirs
-
-        return rel_root and RunApp._should_ignore_path(rel_root, ignore_patterns)
-
-    @staticmethod
-    def compile_app(app_path: str, output_dir: str) -> bool:
-        """
-        Compile a Python app into .pyc bytecode files.
-
-        Args:
-            app_path (str): Path to the app directory containing Python source files.
-            output_dir (str): Path to the output directory where .pyc files will be written.
-
-        Returns:
-            bool: True if compilation successful, False otherwise.
-
-        Raises:
-            OSError: If output directory cannot be created.
-            py_compile.PyCompileError: If any Python file fails to compile (handled internally).
-        """
-        log.info(f"Compiling app at: {app_path}")
-
-        # Create output directory
-        os.makedirs(output_dir, exist_ok=True)
-
-        # Load .ravignore patterns
-        ignore_patterns = RunApp._load_ravignore(app_path)
-
-        # Find all Python files
-        python_files = []
-        for root, dirs, files in os.walk(app_path):
-            # Filter directories and check if current root should be skipped
-            if RunApp._filter_walk_iteration(root, dirs, app_path, ignore_patterns):
-                continue
-
-            for file in files:
-                if file.endswith(".py"):
-                    file_path = os.path.join(root, file)
-                    rel_path = os.path.relpath(file_path, app_path)
-
-                    # Check if file should be ignored
-                    if not RunApp._should_ignore_path(rel_path, ignore_patterns):
-                        python_files.append(file_path)
-
-        log.info(f"Found {len(python_files)} Python files to compile")
-
-        # Compile each file
-        compiled_files = []
-        for py_file in python_files:
-            try:
-                # Get relative path from app directory
-                rel_path = os.path.relpath(py_file, app_path)
-                output_file = os.path.join(output_dir, rel_path + "c")  # .py -> .pyc
-
-                # Create output directory structure
-                os.makedirs(os.path.dirname(output_file), exist_ok=True)
-
-                # Compile the file
-                py_compile.compile(py_file, output_file, doraise=True)
-                compiled_files.append(output_file)
-                log.debug(f"Compiled: {rel_path} -> {rel_path}c")
-
-            except py_compile.PyCompileError as e:
-                log.error(f"Failed to compile {py_file}: {e}")
-                return False
-
-        log.info(f"Successfully compiled {len(compiled_files)} files")
-        return True
-
-    @staticmethod
-    def copy_python_source(app_path: str, output_dir: str) -> bool:
-        """
-        Copy Python source files (.py) without compilation.
-
-        Args:
-            app_path (str): Path to the app directory containing Python source files.
-            output_dir (str): Path to the output directory where .py files will be copied.
-
-        Returns:
-            bool: True if copy successful, False otherwise.
-
-        Raises:
-            OSError: If output directory cannot be created.
-        """
-        log.info(f"Copying Python source files from: {app_path}")
-
-        # Create output directory
-        os.makedirs(output_dir, exist_ok=True)
-
-        # Load .ravignore patterns
-        ignore_patterns = RunApp._load_ravignore(app_path)
-
-        # Find all Python files
-        python_files = []
-        for root, dirs, files in os.walk(app_path):
-            # Filter directories and check if current root should be skipped
-            if RunApp._filter_walk_iteration(root, dirs, app_path, ignore_patterns):
-                continue
-
-            for file in files:
-                if file.endswith(".py"):
-                    file_path = os.path.join(root, file)
-                    rel_path = os.path.relpath(file_path, app_path)
-
-                    # Check if file should be ignored
-                    if not RunApp._should_ignore_path(rel_path, ignore_patterns):
-                        python_files.append(file_path)
-
-        log.info(f"Found {len(python_files)} Python files to copy")
-
-        # Copy each file
-        copied_files = []
-        for py_file in python_files:
-            try:
-                # Get relative path from app directory
-                rel_path = os.path.relpath(py_file, app_path)
-                output_file = os.path.join(output_dir, rel_path)
-
-                # Create output directory structure
-                os.makedirs(os.path.dirname(output_file), exist_ok=True)
-
-                # Copy the file
-                shutil.copy2(py_file, output_file)
-                copied_files.append(output_file)
-                log.debug(f"Copied: {rel_path}")
-
-            except Exception as e:
-                log.error(f"Failed to copy {py_file}: {e}")
-                return False
-
-        log.info(f"Successfully copied {len(copied_files)} Python source files")
-        return True
-
-    @staticmethod
-    def copy_assets(app_path: str, output_dir: str) -> bool:
-        """
-        Copy non-Python asset files from the application directory.
-
-        Supported asset types include images (.png, .jpg, .jpeg, .gif, .svg),
-        audio (.wav, .mp3), video (.mp4), and data files (.json, .txt, .md).
-
-        Args:
-            app_path (str): Path to the app directory containing asset files.
-            output_dir (str): Path to the output directory where assets will be copied.
-
-        Returns:
-            bool: True if assets were copied successfully, False otherwise.
-
-        Raises:
-            OSError: If output directory structure cannot be created or files cannot be copied.
-        """
-        log.info("Copying assets...")
-
-        # Load .ravignore patterns
-        ignore_patterns = RunApp._load_ravignore(app_path)
-
-        # Files to copy (non-Python)
-        asset_extensions = [
-            ".png",
-            ".jpg",
-            ".jpeg",
-            ".gif",
-            ".svg",
-            ".wav",
-            ".mp3",
-            ".mp4",
-            ".json",
-            ".txt",
-            ".md",
-            ".sh",
-        ]
-
-        assets_copied = 0
-        for root, dirs, files in os.walk(app_path):
-            # Filter directories and check if current root should be skipped
-            if RunApp._filter_walk_iteration(root, dirs, app_path, ignore_patterns):
-                continue
-
-            for file in files:
-                if any(file.endswith(ext) for ext in asset_extensions):
-                    src_path = os.path.join(root, file)
-                    rel_path = os.path.relpath(src_path, app_path)
-
-                    # Check if file should be ignored
-                    if RunApp._should_ignore_path(rel_path, ignore_patterns):
-                        continue
-
-                    dst_path = os.path.join(output_dir, rel_path)
-
-                    # Create directory structure
-                    os.makedirs(os.path.dirname(dst_path), exist_ok=True)
-                    shutil.copy2(src_path, dst_path)
-                    assets_copied += 1
-                    log.debug(f"Copied asset: {rel_path}")
-
-        log.info(f"Copied {assets_copied} assets")
-        return True
-
-    @staticmethod
-    def create_rav_package(
-        app_path: str, output_path: str, compile_pyc: bool = True
-    ) -> bool:
-        """
-        Create a .rav package (zip archive) from an application.
-
-        This function either compiles Python files to .pyc or copies .py source files,
-        copies assets, includes requirements.txt if present, and packages everything
-        into a .rav zip file. The temporary build directory is cleaned up after package creation.
-
-        Args:
-            app_path (str): Path to the application directory to package.
-            output_path (str): File path where the .rav package will be created.
-            compile_pyc (bool): If True, compile Python files to .pyc. If False, copy .py source files.
-                Defaults to True for backward compatibility.
-
-        Returns:
-            bool: True if package creation succeeded, False otherwise.
-
-        Raises:
-            OSError: If temporary directory cannot be created or cleaned up.
-            zipfile.BadZipFile: If zip file creation fails.
-        """
-        log.info(f"Creating .rav package: {output_path} (compile_pyc={compile_pyc})")
-
-        # Create temporary directory for build
-        temp_dir = f"/tmp/raven_deploy_{int(time.time())}"
-        os.makedirs(temp_dir, exist_ok=True)
-
-        try:
-            # Compile the app or copy Python source files
-            if compile_pyc:
-                if not RunApp.compile_app(app_path, temp_dir):
-                    return False
-            else:
-                if not RunApp.copy_python_source(app_path, temp_dir):
-                    return False
-
-            # Copy assets
-            if not RunApp.copy_assets(app_path, temp_dir):
-                return False
-
-            # Copy requirements.txt if it exists
-            requirements_path = os.path.join(app_path, "requirements.txt")
-            if os.path.exists(requirements_path):
-                shutil.copy2(requirements_path, temp_dir)
-                log.info("Copied requirements.txt")
-            
-            # Copy default run.sh if one is not provided by the app
-            build_run_sh_path = os.path.join(temp_dir, "run.sh")
-            if not os.path.exists(build_run_sh_path):
-                default_run_sh_path = os.path.join(os.path.dirname(__file__), "run.sh")
-                if os.path.exists(default_run_sh_path):
-                    shutil.copy2(default_run_sh_path, build_run_sh_path)
-                    log.info("Added default run.sh")
-                else:
-                    log.warning(
-                        f"Default run.sh not found at {default_run_sh_path}; skipping"
-                    )
-
-            # Create .rav zip file and collect package structure details
-            package_stats = {
-                "python_files": 0,
-                "assets": {"images": 0, "audio": 0, "video": 0, "data": 0, "other": 0},
-                "requirements": False,
-                "directories": set(),
-                "total_files": 0,
-                "file_list": [],
-            }
-
-            with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as zipf:
-                for root, dirs, files in os.walk(temp_dir):
-                    # Skip any directory named "raven_framework"
-                    if "raven_framework" in root:
-                        log.info("Found raven_framework in source, ignoring")
-                        continue
-                    for file in files:
+        @staticmethod
+        def _filter_walk_iteration(
+            root: str, dirs: List[str], app_path: str, ignore_patterns: List[str]
+        ) -> bool:
+            rel_root = os.path.relpath(root, app_path)
+            if rel_root == ".":
+                rel_root = ""
+            filtered_dirs = []
+            for d in dirs:
+                if d == "__pycache__":
+                    continue
+                dir_rel_path = (
+                    os.path.join(rel_root, d).replace("\\", "/") if rel_root else d
+                )
+                if not RunApp._should_ignore_path(dir_rel_path, ignore_patterns):
+                    filtered_dirs.append(d)
+            dirs[:] = filtered_dirs
+            return rel_root and RunApp._should_ignore_path(rel_root, ignore_patterns)
+
+        @staticmethod
+        def compile_app(app_path: str, output_dir: str) -> bool:
+            log.info(f"Compiling app at: {app_path}")
+            os.makedirs(output_dir, exist_ok=True)
+            ignore_patterns = RunApp._load_ravignore(app_path)
+            python_files = []
+            for root, dirs, files in os.walk(app_path):
+                if RunApp._filter_walk_iteration(root, dirs, app_path, ignore_patterns):
+                    continue
+                for file in files:
+                    if file.endswith(".py"):
                         file_path = os.path.join(root, file)
-                        arc_path = os.path.relpath(file_path, temp_dir)
-                        zipf.write(file_path, arc_path)
-                        log.debug(f"Added to package: {arc_path}")
-
-                        # Collect file list
-                        package_stats["file_list"].append(arc_path)
-
-                        # Collect statistics
-                        package_stats["total_files"] += 1
-                        dir_name = os.path.dirname(arc_path)
-                        if dir_name:
-                            package_stats["directories"].add(dir_name)
-
-                        # Categorize files
-                        if file.endswith((".pyc", ".py")):
-                            package_stats["python_files"] += 1
-                        elif file.endswith((".png", ".jpg", ".jpeg", ".gif", ".svg")):
-                            package_stats["assets"]["images"] += 1
-                        elif file.endswith((".wav", ".mp3")):
-                            package_stats["assets"]["audio"] += 1
-                        elif file.endswith(".mp4"):
-                            package_stats["assets"]["video"] += 1
-                        elif file.endswith((".json", ".txt", ".md")):
-                            if file == "requirements.txt":
-                                package_stats["requirements"] = True
-                            else:
-                                package_stats["assets"]["data"] += 1
-                        else:
-                            package_stats["assets"]["other"] += 1
-
-            # Build detailed log message
-            package_size = os.path.getsize(output_path)
-            size_mb = package_size / (1024 * 1024)
-
-            details = [
-                f"Package: {os.path.basename(output_path)}",
-                f"Size: {size_mb:.2f} MB",
-                f"Total files: {package_stats['total_files']}",
-                f"Python files: {package_stats['python_files']}",
-            ]
-
-            # Add asset breakdown
-            asset_counts = [
-                f"{k}: {v}" for k, v in package_stats["assets"].items() if v > 0
-            ]
-            if asset_counts:
-                details.append(f"Assets ({', '.join(asset_counts)})")
-
-            if package_stats["requirements"]:
-                details.append("Includes requirements.txt")
-
-            if package_stats["directories"]:
-                dir_list = sorted(package_stats["directories"])
-                if len(dir_list) <= 5:
-                    details.append(f"Directories: {', '.join(dir_list)}")
-                else:
-                    details.append(
-                        f"Directories: {len(dir_list)} total ({', '.join(dir_list[:3])}...)"
-                    )
-
-            package_summary = (
-                f"Successfully created .rav package: {' | '.join(details)}"
-            )
-            log.info(package_summary)
-            print(f"\n{package_summary}", file=sys.stdout)
-
-            # Print file list
-            if package_stats["file_list"]:
-                print("\nFiles in package:", file=sys.stdout)
-                for file_path in sorted(package_stats["file_list"]):
-                    print(f"  - {file_path}", file=sys.stdout)
-            print()  # Empty line for spacing
-
+                        rel_path = os.path.relpath(file_path, app_path)
+                        if not RunApp._should_ignore_path(rel_path, ignore_patterns):
+                            python_files.append(file_path)
+            log.info(f"Found {len(python_files)} Python files to compile")
+            for py_file in python_files:
+                try:
+                    rel_path = os.path.relpath(py_file, app_path)
+                    output_file = os.path.join(output_dir, rel_path + "c")
+                    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+                    py_compile.compile(py_file, output_file, doraise=True)
+                    log.debug(f"Compiled: {rel_path} -> {rel_path}c")
+                except py_compile.PyCompileError as e:
+                    log.error(f"Failed to compile {py_file}: {e}")
+                    return False
+            log.info("Successfully compiled files")
             return True
 
-        finally:
-            # Clean up temporary directory
-            if os.path.exists(temp_dir):
-                shutil.rmtree(temp_dir)
-                log.info("Cleaned up temporary files")
+        @staticmethod
+        def copy_python_source(app_path: str, output_dir: str) -> bool:
+            log.info(f"Copying Python source files from: {app_path}")
+            os.makedirs(output_dir, exist_ok=True)
+            ignore_patterns = RunApp._load_ravignore(app_path)
+            python_files = []
+            for root, dirs, files in os.walk(app_path):
+                if RunApp._filter_walk_iteration(root, dirs, app_path, ignore_patterns):
+                    continue
+                for file in files:
+                    if file.endswith(".py"):
+                        file_path = os.path.join(root, file)
+                        rel_path = os.path.relpath(file_path, app_path)
+                        if not RunApp._should_ignore_path(rel_path, ignore_patterns):
+                            python_files.append(file_path)
+            log.info(f"Found {len(python_files)} Python files to copy")
+            for py_file in python_files:
+                try:
+                    rel_path = os.path.relpath(py_file, app_path)
+                    output_file = os.path.join(output_dir, rel_path)
+                    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+                    shutil.copy2(py_file, output_file)
+                    log.debug(f"Copied: {rel_path}")
+                except Exception as e:
+                    log.error(f"Failed to copy {py_file}: {e}")
+                    return False
+            log.info("Successfully copied Python source files")
+            return True
 
-    @staticmethod
-    def deploy_app(app_name: str = "dev", compile_pyc: bool = True) -> Optional[str]:
-        """
-        Deploy the current app as a .rav package.
+        @staticmethod
+        def copy_assets(app_path: str, output_dir: str) -> bool:
+            log.info("Copying assets...")
+            ignore_patterns = RunApp._load_ravignore(app_path)
+            asset_extensions = [
+                ".png",
+                ".jpg",
+                ".jpeg",
+                ".gif",
+                ".svg",
+                ".wav",
+                ".mp3",
+                ".mp4",
+                ".json",
+                ".txt",
+                ".md",
+                ".sh",
+            ]
+            assets_copied = 0
+            for root, dirs, files in os.walk(app_path):
+                if RunApp._filter_walk_iteration(root, dirs, app_path, ignore_patterns):
+                    continue
+                for file in files:
+                    if any(file.endswith(ext) for ext in asset_extensions):
+                        src_path = os.path.join(root, file)
+                        rel_path = os.path.relpath(src_path, app_path)
+                        if RunApp._should_ignore_path(rel_path, ignore_patterns):
+                            continue
+                        dst_path = os.path.join(output_dir, rel_path)
+                        os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+                        shutil.copy2(src_path, dst_path)
+                        assets_copied += 1
+                        log.debug(f"Copied asset: {rel_path}")
+            log.info(f"Copied {assets_copied} assets")
+            return True
 
-        Validates Python version, cleans up old .rav files, checks for main.py,
-        and creates a new .rav package with a timestamp.
-
-        Args:
-            app_name (str): Name for the app package. Defaults to "dev".
-            compile_pyc (bool): If True, compile Python files to .pyc. If False, copy .py source files.
-                Defaults to True for backward compatibility.
-
-        Returns:
-            Optional[str]: Path to the created .rav package if successful, None otherwise.
-
-        Raises:
-            SystemExit: If Python version is not 3.12.12 or main.py is not found.
-        """
-        # Get actual Python version from the running interpreter
-        version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
-        if version != PYTHON_VERSION_ON_RAVEN_DEVICE:
-            error_msg = f"FATAL ERROR: Make sure python version is {PYTHON_VERSION_ON_RAVEN_DEVICE}"
-            log.error(error_msg)
-            print(f"ERROR: {error_msg}", file=sys.stderr)
-            print(f"Current Python version: {version}", file=sys.stderr)
-        if compile_pyc:
+        @staticmethod
+        def create_rav_package(
+            app_path: str, output_path: str, compile_pyc: bool = True
+        ) -> bool:
             log.info(
-                f"Deploying app with Python version: {version} and compiling to .pyc"
+                f"Creating .rav package: {output_path} (compile_pyc={compile_pyc})"
             )
-            print(f"Using Python version: {version}", file=sys.stdout)
-
-        # Clean up old .rav files
-        old_files = glob.glob(os.path.join(".", "*.rav"))
-        for f in old_files:
-            filename = os.path.basename(f)
+            temp_dir = f"/tmp/raven_deploy_{int(time.time())}"
+            os.makedirs(temp_dir, exist_ok=True)
             try:
-                os.remove(f)
-                log.info(f"Deleted old file: {filename}")
-            except Exception as e:
-                log.warning(f"Could not delete old file {filename}: {e}")
+                if compile_pyc:
+                    if not RunApp.compile_app(app_path, temp_dir):
+                        return False
+                else:
+                    if not RunApp.copy_python_source(app_path, temp_dir):
+                        return False
+                if not RunApp.copy_assets(app_path, temp_dir):
+                    return False
+                requirements_path = os.path.join(app_path, "requirements.txt")
+                if os.path.exists(requirements_path):
+                    shutil.copy2(requirements_path, temp_dir)
+                    log.info("Copied requirements.txt")
+                build_run_sh_path = os.path.join(temp_dir, "run.sh")
+                if not os.path.exists(build_run_sh_path):
+                    default_run_sh_path = os.path.join(
+                        os.path.dirname(__file__), "run.sh"
+                    )
+                    if os.path.exists(default_run_sh_path):
+                        shutil.copy2(default_run_sh_path, build_run_sh_path)
+                        log.info("Added default run.sh")
+                    else:
+                        log.warning(
+                            f"Default run.sh not found at {default_run_sh_path}; skipping"
+                        )
+                package_stats = {
+                    "python_files": 0,
+                    "assets": {
+                        "images": 0,
+                        "audio": 0,
+                        "video": 0,
+                        "data": 0,
+                        "other": 0,
+                    },
+                    "requirements": False,
+                    "directories": set(),
+                    "total_files": 0,
+                    "file_list": [],
+                }
+                with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+                    for root, dirs, files in os.walk(temp_dir):
+                        if "raven_framework" in root:
+                            log.info("Found raven_framework in source, ignoring")
+                            continue
+                        for file in files:
+                            file_path = os.path.join(root, file)
+                            arc_path = os.path.relpath(file_path, temp_dir)
+                            zipf.write(file_path, arc_path)
+                            log.debug(f"Added to package: {arc_path}")
+                            package_stats["file_list"].append(arc_path)
+                            package_stats["total_files"] += 1
+                            dir_name = os.path.dirname(arc_path)
+                            if dir_name:
+                                package_stats["directories"].add(dir_name)
+                            if file.endswith((".pyc", ".py")):
+                                package_stats["python_files"] += 1
+                            elif file.endswith(
+                                (".png", ".jpg", ".jpeg", ".gif", ".svg")
+                            ):
+                                package_stats["assets"]["images"] += 1
+                            elif file.endswith((".wav", ".mp3")):
+                                package_stats["assets"]["audio"] += 1
+                            elif file.endswith(".mp4"):
+                                package_stats["assets"]["video"] += 1
+                            elif file.endswith((".json", ".txt", ".md")):
+                                if file == "requirements.txt":
+                                    package_stats["requirements"] = True
+                                else:
+                                    package_stats["assets"]["data"] += 1
+                            else:
+                                package_stats["assets"]["other"] += 1
+                package_size = os.path.getsize(output_path)
+                size_mb = package_size / (1024 * 1024)
+                details = [
+                    f"Package: {os.path.basename(output_path)}",
+                    f"Size: {size_mb:.2f} MB",
+                    f"Total files: {package_stats['total_files']}",
+                    f"Python files: {package_stats['python_files']}",
+                ]
+                asset_counts = [
+                    f"{k}: {v}" for k, v in package_stats["assets"].items() if v > 0
+                ]
+                if asset_counts:
+                    details.append(f"Assets ({', '.join(asset_counts)})")
+                if package_stats["requirements"]:
+                    details.append("Includes requirements.txt")
+                if package_stats["directories"]:
+                    dir_list = sorted(package_stats["directories"])
+                    if len(dir_list) <= 5:
+                        details.append(f"Directories: {', '.join(dir_list)}")
+                    else:
+                        details.append(
+                            f"Directories: {len(dir_list)} total ({', '.join(dir_list[:3])}...)"
+                        )
+                package_summary = (
+                    f"Successfully created .rav package: {' | '.join(details)}"
+                )
+                log.info(package_summary)
+                print(f"\n{package_summary}", file=sys.stdout)
+                if package_stats["file_list"]:
+                    print("\nFiles in package:", file=sys.stdout)
+                    for file_path in sorted(package_stats["file_list"]):
+                        print(f"  - {file_path}", file=sys.stdout)
+                print()
+                return True
+            finally:
+                if os.path.exists(temp_dir):
+                    shutil.rmtree(temp_dir)
+                    log.info("Cleaned up temporary files")
 
-        if not os.path.exists("main.py"):
-            log.error("main.py not found in current directory")
-            log.error("Please run this script from the same directory as main.py")
-            return None
-
-        timestamp = int(time.time())
-        output_path = f"{app_name}_{version}_{timestamp}.rav"
-
-        if RunApp.create_rav_package(".", output_path, compile_pyc=compile_pyc):
-            log.info(f"Package created: {os.path.abspath(output_path)}")
-            log.info("=" * 50)
-            log.info("DEPLOYMENT SUCCESSFUL!")
-            return output_path
-        else:
-            log.error(f"Failed to create package for Python {version}")
-            return None
+        @staticmethod
+        def deploy_app(
+            app_name: str = "dev", compile_pyc: bool = True
+        ) -> Optional[str]:
+            version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+            if version != PYTHON_VERSION_ON_RAVEN_DEVICE:
+                error_msg = f"FATAL ERROR: Make sure python version is {PYTHON_VERSION_ON_RAVEN_DEVICE}"
+                log.error(error_msg)
+                print(f"ERROR: {error_msg}", file=sys.stderr)
+                print(f"Current Python version: {version}", file=sys.stderr)
+            if compile_pyc:
+                log.info(
+                    f"Deploying app with Python version: {version} and compiling to .pyc"
+                )
+                print(f"Using Python version: {version}", file=sys.stdout)
+            old_files = glob.glob(os.path.join(".", "*.rav"))
+            for f in old_files:
+                filename = os.path.basename(f)
+                try:
+                    os.remove(f)
+                    log.info(f"Deleted old file: {filename}")
+                except Exception as e:
+                    log.warning(f"Could not delete old file {filename}: {e}")
+            if not os.path.exists("main.py"):
+                log.error("main.py not found in current directory")
+                log.error("Please run this script from the same directory as main.py")
+                return None
+            timestamp = int(time.time())
+            output_path = f"{app_name}_{version}_{timestamp}.rav"
+            if RunApp.create_rav_package(".", output_path, compile_pyc=compile_pyc):
+                log.info(f"Package created: {os.path.abspath(output_path)}")
+                log.info("=" * 50)
+                log.info("DEPLOYMENT SUCCESSFUL!")
+                return output_path
+            else:
+                log.error(f"Failed to create package for Python {version}")
+                return None

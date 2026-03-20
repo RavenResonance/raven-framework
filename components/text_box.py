@@ -19,7 +19,8 @@ custom fonts, colors, alignment, and word wrapping.
 
 from typing import Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import QLabel, QWidget
 
 from ..helpers.font_utils import create_font
@@ -31,6 +32,8 @@ theme = RAVEN_CORE
 
 log = get_logger("TextBox")
 
+_SIZE_HINT_HEIGHT_BUFFER_BASE = 2
+_SIZE_HINT_HEIGHT_BUFFER_PER_LINE = 2
 
 class TextBox(QLabel):
     """
@@ -121,11 +124,15 @@ class TextBox(QLabel):
             self.setAlignment(align_value)
 
             self.setWordWrap(bool(wrap_words))
+            self.setIndent(0)
 
             if width is not None:
                 self.setFixedWidth(int(width))
             if height is not None:
                 self.setFixedHeight(int(height))
+
+            margin_h = max(4, font_size // 6) if wrap_words else 0
+            self.setContentsMargins(margin_h, 0, margin_h, 0)
             self.adjustSize()
         except Exception as e:
             log.error(f"Error initializing TextBox: {e}", exc_info=True)
@@ -144,7 +151,28 @@ class TextBox(QLabel):
         try:
             self.setText(new_text)
             self.adjustSize()
-
         except Exception as e:
             log.error(f"Failed to set text on TextBox: {e}", exc_info=True)
             raise
+
+    def sizeHint(self) -> QSize:
+        """Return size hint with width/height adjustments for word wrap and fixed width."""
+        hint = super().sizeHint()
+        if hint.width() <= 0:
+            return hint
+        w = hint.width()
+        h = hint.height()
+        if self.wordWrap() and h > 0:
+            fm = QFontMetrics(self.font())
+            line_height = fm.height()
+            if line_height > 0:
+                line_count = max(1, round(h / line_height))
+                h += (
+                    _SIZE_HINT_HEIGHT_BUFFER_BASE
+                    + line_count * _SIZE_HINT_HEIGHT_BUFFER_PER_LINE
+                )
+        if self.minimumWidth() == self.maximumWidth() and self.maximumWidth() > 0:
+            w = self.minimumWidth()
+        else:
+            w = hint.width() + 4
+        return QSize(w, h)

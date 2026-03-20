@@ -5,9 +5,7 @@
   },
   "fps": {
     "UI_FPS": 30,
-    "SIMULATOR_FPS": 30,
-    "CAST_FPS_RAVEN_DEVICE": 15,
-    "CAST_FPS_NON_RAVEN_DEVICE": 30
+    "SIMULATOR_FPS": 30
   },
   "deployment": {
     "BASE_API_URL": "https://v1.apps.s.raven.computer/",
@@ -34,12 +32,14 @@
     "ACTION_BUTTON_ICON_PATH": "assets/icons/action_button.png"
   },
   "simulator": {
+    "SIMULATOR_CALIBRATION_FILENAME": "raven_simulator_calibration.npz",
     "DEFAULT_OVERLAY_BRIGHTNESS": 0.9,
     "SNAPSHOT_TMP_DIR": "tmp",
     "SNAPSHOT_FILENAME": "widget_snapshot.png",
     "OVERLAY_BACKGROUND_VIDEO_DAY_PATH": "assets/overlay_background_videos/day.mp4",
     "OVERLAY_BACKGROUND_VIDEO_NIGHT_PATH": "assets/overlay_background_videos/night.mp4",
-    "OVERLAY_BACKGROUND_VIDEO_OUTDOORS_PATH": "assets/overlay_background_videos/outdoor.mp4"
+    "OVERLAY_BACKGROUND_VIDEO_OUTDOORS_PATH": "assets/overlay_background_videos/outdoor.mp4",
+    "RAW_MODE_TOOLTIP_TEXT": "The raw app that will render on Raven Glass. Use other modes for previewing how it will blend with background, note that performance other modes is relatively less due to real time blending."
   },
   "logger": {
     "LOG_NAME": "raven_log",
@@ -54,4 +54,3 @@
     "ENABLE_CONSOLE_LOGGING": true
   }
 }
-

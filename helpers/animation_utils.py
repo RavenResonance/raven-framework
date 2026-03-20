@@ -16,8 +16,35 @@ Animation utilities for Raven Framework.
 This module provides simple animation utility functions for widgets.
 """
 
-from PySide6.QtCore import QPropertyAnimation, QTimer
+from PySide6.QtCore import QPropertyAnimation, QTimer, qInstallMessageHandler
 from PySide6.QtWidgets import QGraphicsOpacityEffect, QWidget
+
+_painter_warning_logged: bool = False
+_qt_default_message_handler = None
+
+
+def _qt_message_handler(msg_type, context, message: str) -> None:
+    global _painter_warning_logged
+    if (
+        "QPainter::begin" in message
+        or "QPainter::translate" in message
+        or "Painter not active" in message
+    ):
+        if not _painter_warning_logged:
+            _painter_warning_logged = True
+            print(message)
+        return
+    if _qt_default_message_handler is not None:
+        _qt_default_message_handler(msg_type, context, message)
+    else:
+        import sys
+        print(message, file=sys.stderr)
+
+
+def _install_painter_warning_filter() -> None:
+    global _qt_default_message_handler
+    if _qt_default_message_handler is None:
+        _qt_default_message_handler = qInstallMessageHandler(_qt_message_handler)
 
 
 def _fade_widget(
@@ -44,6 +71,8 @@ def _fade_widget(
         raise ValueError(f"end_value must be between 0.0 and 1.0, got {end_value}")
     if duration < 0:
         raise ValueError(f"duration must be non-negative, got {duration}")
+
+    _install_painter_warning_filter()
 
     existing_effect = widget.graphicsEffect()
     if isinstance(existing_effect, QGraphicsOpacityEffect):
