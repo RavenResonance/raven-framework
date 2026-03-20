@@ -20,6 +20,7 @@ continuous scroll while hovering, and auto-scroll (teleprompter style).
 from typing import Optional
 
 from PySide6.QtCore import (
+    Property,
     QEasingCurve,
     QEvent,
     QPoint,
@@ -52,7 +53,6 @@ class PaginationContainer(QWidget):
     def __init__(
         self,
         parent=None,
-        initial_hover_scale: float = 1.5,
         dwell_hover_scale: float = 3.5,
         dwell_time: int = 500,
         outline_width: int = 2,
@@ -60,6 +60,7 @@ class PaginationContainer(QWidget):
         base_corner_radius_percent: float = 0.5,
         hover_corner_radius_percent: float = 0.5,
         animation_duration: int = 200,
+        outline_fade_duration: int = 200,
     ):
         super().__init__(parent)
         self.setAttribute(Qt.WA_TranslucentBackground, False)
@@ -68,9 +69,7 @@ class PaginationContainer(QWidget):
 
         self.base_width = 40
         self.base_height = 0
-        self.initial_hover_scale = initial_hover_scale
         self.dwell_hover_scale = dwell_hover_scale
-        self.hover_scale = self.initial_hover_scale
         self.current_scale = 1.0
         self.target_scale = 1.0
         self.is_dwelling = False
@@ -80,6 +79,8 @@ class PaginationContainer(QWidget):
         self.base_corner_radius_percent = base_corner_radius_percent
         self.hover_corner_radius_percent = hover_corner_radius_percent
         self.current_corner_radius = 0
+        self.outline_fade_duration = outline_fade_duration
+        self._outline_opacity = 0.0
 
         self.icons = []
         self.original_padding = 0
@@ -94,38 +95,44 @@ class PaginationContainer(QWidget):
         self.scale_animation.setDuration(animation_duration)
         self.scale_animation.setEasingCurve(QEasingCurve.OutCubic)
 
+        self._outline_fade_anim = QPropertyAnimation(self, b"outlineOpacity", self)
+        self._outline_fade_anim.setEasingCurve(QEasingCurve.OutCubic)
+
         def on_value_changed(value):
-            if isinstance(value, QRect):
-                if self.base_width > 0 and self.base_height > 0:
-                    width_scale = value.width() / self.base_width
-                    height_scale = value.height() / self.base_height
-                    self.current_scale = (width_scale + height_scale) / 2
+            if (
+                isinstance(value, QRect)
+                and self.base_width > 0
+                and self.base_height > 0
+            ):
+                width_scale = value.width() / self.base_width
+                height_scale = value.height() / self.base_height
+                self.current_scale = (width_scale + height_scale) / 2
 
-                    scale_factor = (self.current_scale - 1.0) / (
-                        self.dwell_hover_scale - 1.0
+                scale_factor = (self.current_scale - 1.0) / (
+                    self.dwell_hover_scale - 1.0
+                )
+                scale_factor = max(0.0, min(1.0, scale_factor))
+
+                current_radius_percent = (
+                    self.base_corner_radius_percent
+                    + (
+                        self.hover_corner_radius_percent
+                        - self.base_corner_radius_percent
                     )
-                    scale_factor = max(0.0, min(1.0, scale_factor))
+                    * scale_factor
+                )
 
-                    current_radius_percent = (
-                        self.base_corner_radius_percent
-                        + (
-                            self.hover_corner_radius_percent
-                            - self.base_corner_radius_percent
-                        )
-                        * scale_factor
-                    )
+                current_width = value.width()
+                current_height = value.height()
+                smaller_dimension = min(current_width, current_height)
+                self.current_corner_radius = int(
+                    smaller_dimension * current_radius_percent
+                )
 
-                    current_width = value.width()
-                    current_height = value.height()
-                    smaller_dimension = min(current_width, current_height)
-                    self.current_corner_radius = int(
-                        smaller_dimension * current_radius_percent
-                    )
-
-                    icon_scale = 1.0 + (self.dwell_hover_scale - 1.0) * scale_factor
-                    self._update_icon_sizes(icon_scale)
-                    self._update_icon_positions(scale_factor)
-                    self.update()
+                icon_scale = 1.0 + (self.dwell_hover_scale - 1.0) * scale_factor
+                self._update_icon_sizes(icon_scale)
+                self._update_icon_positions(scale_factor)
+                self.update()
 
         self.scale_animation.valueChanged.connect(on_value_changed)
 
@@ -133,6 +140,15 @@ class PaginationContainer(QWidget):
         self.container_y = 0
         self.container_width = self.base_width
         self.container_height = 0
+
+    def get_outline_opacity(self) -> float:
+        return self._outline_opacity
+
+    def set_outline_opacity(self, value: float) -> None:
+        self._outline_opacity = max(0.0, min(1.0, value))
+        self.update()
+
+    outlineOpacity = Property(float, get_outline_opacity, set_outline_opacity)
 
     def set_container_bounds(self, x, y, width, height):
         """Set the bounds of the container area."""
@@ -208,27 +224,33 @@ class PaginationContainer(QWidget):
                 icon.move(x, y)
 
     def enterEvent(self, event: QEnterEvent) -> None:
-        """Handle mouse enter - scale to initial hover scale, then start dwell timer."""
+        """Handle mouse enter - fade in border only, then start dwell timer."""
         self.is_dwelling = True
-        self.hover_scale = self.initial_hover_scale
-        self.target_scale = self.initial_hover_scale
-        self._animate_scale()
+        self.target_scale = 1.0
+        self._outline_fade_anim.stop()
+        self._outline_fade_anim.setDuration(self.outline_fade_duration)
+        self._outline_fade_anim.setStartValue(self._outline_opacity)
+        self._outline_fade_anim.setEndValue(1.0)
+        self._outline_fade_anim.start()
         self.dwell_timer.start(self.dwell_time)
         super().enterEvent(event)
 
     def leaveEvent(self, event: QEvent) -> None:
-        """Handle mouse leave - scale down the container and stop dwell timer."""
+        """Handle mouse leave - scale down and fade out border."""
         self.is_dwelling = False
         self.dwell_timer.stop()
         self.target_scale = 1.0
-        self.hover_scale = self.initial_hover_scale
         self._animate_scale()
+        self._outline_fade_anim.stop()
+        self._outline_fade_anim.setDuration(self.outline_fade_duration)
+        self._outline_fade_anim.setStartValue(self._outline_opacity)
+        self._outline_fade_anim.setEndValue(0.0)
+        self._outline_fade_anim.start()
         super().leaveEvent(event)
 
     def _on_dwell_complete(self):
         """Handle dwell timer completion - scale to final hover scale."""
         if self.is_dwelling:
-            self.hover_scale = self.dwell_hover_scale
             self.target_scale = self.dwell_hover_scale
             self._animate_scale()
 
@@ -267,25 +289,6 @@ class PaginationContainer(QWidget):
                     1.0 + (self.dwell_hover_scale - 1.0) * scale_factor
                 )
                 self._update_icon_positions(scale_factor)
-            elif self.current_scale >= self.initial_hover_scale:
-                current_width = int(self.base_width * self.current_scale)
-                current_height = int(self.base_height * self.current_scale)
-                smaller_dimension = min(current_width, current_height)
-                scale_factor = (self.current_scale - 1.0) / (
-                    self.dwell_hover_scale - 1.0
-                )
-                scale_factor = max(0.0, min(1.0, scale_factor))
-                radius_percent = (
-                    self.base_corner_radius_percent
-                    + (
-                        self.hover_corner_radius_percent
-                        - self.base_corner_radius_percent
-                    )
-                    * scale_factor
-                )
-                self.current_corner_radius = int(smaller_dimension * radius_percent)
-                self._update_icon_sizes(self.current_scale)
-                self._update_icon_positions(scale_factor)
             else:
                 smaller_dimension = min(self.base_width, self.base_height)
                 self.current_corner_radius = int(
@@ -299,30 +302,32 @@ class PaginationContainer(QWidget):
         self.scale_animation.start()
 
     def paintEvent(self, event: QPaintEvent) -> None:
-        """Draw the container with black background and white outline with rounded corners."""
+        """Draw black background and outline; outline opacity is animated for fade in/out."""
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-
-        background_rect = self.rect()
         painter.setBrush(to_qcolor("black"))
         painter.setPen(Qt.NoPen)
         painter.drawRoundedRect(
-            background_rect, self.current_corner_radius, self.current_corner_radius
+            self.rect(),
+            self.current_corner_radius,
+            self.current_corner_radius,
         )
-
-        pen = QPen(to_qcolor(self.outline_color), self.outline_width)
-        painter.setPen(pen)
-        painter.setBrush(Qt.NoBrush)
-
-        rect = self.rect().adjusted(
-            self.outline_width // 2,
-            self.outline_width // 2,
-            -self.outline_width // 2,
-            -self.outline_width // 2,
-        )
-        painter.drawRoundedRect(
-            rect, self.current_corner_radius, self.current_corner_radius
-        )
+        if self._outline_opacity > 0:
+            outline_color = to_qcolor(self.outline_color)
+            outline_color.setAlphaF(self._outline_opacity)
+            painter.setPen(QPen(outline_color, self.outline_width))
+            painter.setBrush(Qt.NoBrush)
+            rect = self.rect().adjusted(
+                self.outline_width // 2,
+                self.outline_width // 2,
+                -self.outline_width // 2,
+                -self.outline_width // 2,
+            )
+            painter.drawRoundedRect(
+                rect,
+                self.current_corner_radius,
+                self.current_corner_radius,
+            )
 
 
 class ScrollView(QWidget):
@@ -346,7 +351,7 @@ class ScrollView(QWidget):
         height (int): Height of the widget in pixels. Defaults to 720. If content_widget is provided
                       and default value is used, will be calculated as content_widget.height() + 100.
         scroll_step (int): Number of pages to scroll on dwell. Defaults to 1.
-        animation_duration (int): Duration (ms) of scroll animation. Defaults to 400.
+        animation_duration (int): Duration (ms) of scroll animation. Defaults to 700.
         parent (Optional[QWidget]): Optional parent widget. Defaults to None.
         scroll_start_dwell_time (int): Delay (ms) before starting dwell scroll. Defaults to 1500.
         scroll_continue_swell_time (int): Interval (ms) between repeated scrolls during dwell. Defaults to 1200.
@@ -362,9 +367,8 @@ class ScrollView(QWidget):
         pagination_container_horizontal_padding (int): Horizontal padding inside pagination container. Defaults to 10.
         pagination_container_vertical_padding (int): Vertical padding above and below circles in pagination container. Defaults to 10.
         pagination_indicator_color (str): Color of inactive pagination indicators. Defaults to "#3C3C3C".
-        pagination_initial_hover_scale (float): First scale on hover (before dwell). Defaults to 1.5.
-        pagination_dwell_hover_scale (float): Final scale after dwell time. Defaults to 3.5.
-        pagination_dwell_time (int): Time (ms) before scaling to final hover scale. Defaults to 500.
+        pagination_dwell_hover_scale (float): Scale after dwell time. Defaults to 3.5.
+        pagination_dwell_time (int): Time (ms) before scaling to final hover scale. Defaults to 1000.
         pagination_outline_width (int): Width of pagination container outline. Defaults to 2.
         pagination_outline_color (str): Color of pagination container outline. Defaults to "white".
         pagination_corner_radius_percent (float): Corner radius as percentage (0.0-1.0). Defaults to 0.5.
@@ -377,7 +381,7 @@ class ScrollView(QWidget):
         width: int = 480,
         height: int = 720,
         scroll_step: int = 1,
-        animation_duration: int = 400,
+        animation_duration: int = 700,
         parent: Optional[QWidget] = None,
         scroll_start_dwell_time: int = 1500,
         scroll_continue_swell_time: int = 1200,
@@ -393,9 +397,8 @@ class ScrollView(QWidget):
         pagination_container_horizontal_padding: int = 10,
         pagination_container_vertical_padding: int = 30,
         pagination_indicator_color: str = theme.basic_palette.gray,
-        pagination_initial_hover_scale: float = 1.2,
         pagination_dwell_hover_scale: float = 3.5,
-        pagination_dwell_time: int = 500,
+        pagination_dwell_time: int = 1000,
         pagination_outline_width: int = 2,
         pagination_outline_color: str = theme.borders.color,
         pagination_corner_radius_percent: float = 0.5,
@@ -436,7 +439,6 @@ class ScrollView(QWidget):
             pagination_container_vertical_padding
         )
         self.pagination_indicator_color = pagination_indicator_color
-        self.pagination_initial_hover_scale = pagination_initial_hover_scale
         self.pagination_dwell_hover_scale = pagination_dwell_hover_scale
         self.pagination_dwell_time = pagination_dwell_time
         self.pagination_outline_width = pagination_outline_width
@@ -519,7 +521,6 @@ class ScrollView(QWidget):
         if self.total_pages <= 1:
             self.pagination_container = PaginationContainer(
                 self,
-                initial_hover_scale=self.pagination_initial_hover_scale,
                 dwell_hover_scale=self.pagination_dwell_hover_scale,
                 dwell_time=self.pagination_dwell_time,
                 outline_width=self.pagination_outline_width,
@@ -535,7 +536,6 @@ class ScrollView(QWidget):
 
         self.pagination_container = PaginationContainer(
             self,
-            initial_hover_scale=self.pagination_initial_hover_scale,
             dwell_hover_scale=self.pagination_dwell_hover_scale,
             dwell_time=self.pagination_dwell_time,
             outline_width=self.pagination_outline_width,

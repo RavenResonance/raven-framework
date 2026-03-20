@@ -18,12 +18,11 @@ OpenCV and NumPy. Light utilities are imported from utils_light.
 """
 
 import base64
-from typing import Optional
+from typing import Optional, Tuple
 
 import cv2
 import numpy as np
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QImage, QPixmap
+from PySide6.QtGui import QImage, QPixmap
 
 from .logger import get_logger
 
@@ -178,3 +177,161 @@ def image_to_base64(image: np.ndarray) -> str:
         str: Base64-encoded JPEG string, or empty string on error.
     """
     return convert_ndarray_to_base64_image(image)
+
+
+def is_qimage_mostly_black(image: QImage, threshold: float) -> bool:
+    """
+    Return True if image is null or mean pixel value (0-255) is below threshold.
+    """
+    result = qimage_to_rgb_bytes(image)
+    if result is None:
+        return True
+    try:
+        rgb_bytes, w, h = result
+        arr = np.frombuffer(rgb_bytes, dtype=np.uint8)
+        return float(arr.mean()) < threshold
+    except Exception:
+        return True
+
+
+def qimage_to_rgb_bytes(image: QImage) -> Optional[Tuple[bytes, int, int]]:
+    """
+    Convert QImage to contiguous RGB bytes (width * height * 3).
+    Uses memoryview when contiguous; otherwise scanline copy.
+
+    Returns:
+        (bytes, width, height) or None if conversion failed.
+    """
+    if image.isNull():
+        return None
+    w, h = image.width(), image.height()
+    if w <= 0 or h <= 0:
+        return None
+    if image.format() != QImage.Format.Format_RGB888:
+        image = image.convertToFormat(QImage.Format.Format_RGB888)
+
+    ptr = image.bits()
+    bpl = image.bytesPerLine()
+    row_bytes = w * 3
+
+    # Fast path: contiguous buffer (PySide6 returns memoryview)
+    if ptr is not None and bpl == row_bytes:
+        try:
+            buf = np.asarray(ptr, dtype=np.uint8)
+            arr = buf[: h * row_bytes].reshape((h, w, 3)).copy()
+            return (arr.tobytes(), w, h)
+        except Exception as e:
+            log.warning(
+                f"qimage_to_rgb_bytes: Error converting QImage to RGB bytes: {e}. Using fallback method."
+            )
+            pass
+
+    # Fallback: row-by-row via constScanLine
+    try:
+        arr = np.empty((h, w, 3), dtype=np.uint8)
+        for i in range(h):
+            line = image.constScanLine(i)
+            if line is not None:
+                arr[i] = np.asarray(line[:row_bytes], dtype=np.uint8).reshape(w, 3)
+            else:
+                for x in range(w):
+                    rgb = image.pixel(x, i)
+                    arr[i, x, 0] = (rgb >> 16) & 0xFF
+                    arr[i, x, 1] = (rgb >> 8) & 0xFF
+                    arr[i, x, 2] = rgb & 0xFF
+        return (arr.tobytes(), w, h)
+    except Exception:
+        pass
+    return None
+
+
+def rgb_bytes_to_png_bytes(
+    rgb_bytes: bytes,
+    width: int,
+    height: int,
+    size: Tuple[int, int],
+) -> Optional[bytes]:
+    """
+    Resize RGB bytes to target size and encode as PNG.
+
+    Args:
+        rgb_bytes: Contiguous RGB (width * height * 3).
+        width, height: Source dimensions.
+        size: (target_w, target_h).
+
+    Returns:
+        PNG bytes or None on failure.
+    """
+    if width <= 0 or height <= 0 or len(rgb_bytes) < width * height * 3:
+        return None
+    try:
+        arr = np.frombuffer(rgb_bytes, dtype=np.uint8).reshape((height, width, 3))
+        scaled = cv2.resize(arr, size, interpolation=cv2.INTER_LINEAR)
+        bgr = cv2.cvtColor(scaled, cv2.COLOR_RGB2BGR)
+        ok, png_buf = cv2.imencode(".png", bgr)
+        if not ok or png_buf is None:
+            return None
+        return png_buf.tobytes()
+    except Exception:
+        return None
+
+
+def rgb_bytes_to_jpeg_bytes(
+    rgb_bytes: bytes,
+    width: int,
+    height: int,
+    size: Tuple[int, int],
+    quality: int,
+) -> Optional[bytes]:
+    """
+    Resize RGB bytes to target size and encode as JPEG.
+
+    Args:
+        rgb_bytes: Contiguous RGB (width * height * 3).
+        width, height: Source dimensions.
+        size: (target_w, target_h).
+        quality: JPEG quality 1-100.
+
+    Returns:
+        JPEG bytes or None on failure.
+    """
+    if width <= 0 or height <= 0 or len(rgb_bytes) < width * height * 3:
+        return None
+    try:
+        arr = np.frombuffer(rgb_bytes, dtype=np.uint8).reshape((height, width, 3))
+        scaled = cv2.resize(arr, size, interpolation=cv2.INTER_LINEAR)
+        bgr = cv2.cvtColor(scaled, cv2.COLOR_RGB2BGR)
+        ok, jpeg_buf = cv2.imencode(
+            ".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, max(1, min(100, quality))]
+        )
+        if not ok or jpeg_buf is None:
+            return None
+        return jpeg_buf.tobytes()
+    except Exception:
+        return None
+
+
+def qimage_to_resized_jpeg_bytes(
+    image: QImage, size: Tuple[int, int], quality: int
+) -> Optional[bytes]:
+    """
+    Resize QImage to target size and encode as JPEG bytes.
+    """
+    result = qimage_to_rgb_bytes(image)
+    if result is None:
+        return None
+    rgb_bytes, w, h = result
+    return rgb_bytes_to_jpeg_bytes(rgb_bytes, w, h, size, quality)
+
+
+def qimage_to_resized_png_bytes(
+    image: QImage, size: Tuple[int, int]
+) -> Optional[bytes]:
+    """
+    Resize QImage to target size and encode as PNG bytes.
+    """
+    result = qimage_to_rgb_bytes(image)
+    if result is None:
+        return None
+    rgb_bytes, w, h = result
+    return rgb_bytes_to_png_bytes(rgb_bytes, w, h, size)

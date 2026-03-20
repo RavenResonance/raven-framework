@@ -9,7 +9,7 @@ A comprehensive UI framework and API for building gaze-based applications for Ra
 
 The framework is being developed by Raven Resonance, a small team building AR glasses for all-day wear. [Raven Glass v1](https://raven.computer/) hardware will be out soon and runs RavenOS, a Linux-based operating system. This repo contains a preview of Raven Framework and is the first part of the Raven SDK. We would love to hear your feedback in our [Discord community](https://raven.computer/s/discord)!
 
-`version = "1.0.1"`
+`version = "1.0.2"`
 
 
 ## Table of Contents
@@ -508,7 +508,7 @@ viewer.play_video()
 viewer.pause_video()
 ```
 
-**Frequently used params:** `media_path` (str), `corner_radius` (int), `width` (int), `height` (int), `loop_video` (bool)
+**Frequently used params:** `media_path` (str), `corner_radius` (int), `width` (int), `height` (int), `loop_video` (bool), `scale_mode` (str: "cover" or "fit")
 
 **Frequently used methods:** `play_video()`, `pause_video()`
 

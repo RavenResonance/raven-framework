@@ -18,11 +18,10 @@ This module provides the main application container widget with header controls
 """
 
 import os
-import sys
 from typing import Optional
 
 from PySide6.QtCore import QDateTime, Qt, QTimer
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QApplication, QWidget
 
 from ..components.container import Container
 from ..components.icon import Icon
@@ -48,6 +47,7 @@ APP_CONTAINER_HEIGHT = APP_RESOLUTION[1]
 
 # Constants for timer intervals
 TIME_UPDATE_INTERVAL_MS = 1000  # milliseconds
+ENABLE_TIME_DISPLAY = False
 
 
 class RavenApp(Container):
@@ -109,17 +109,15 @@ class RavenApp(Container):
 
         self.close_icon = Icon(is_square=False, background_image_path=home_icon_path)
         self.close_icon.on_clicked(self.on_home_clicked)
-
-        self.time = TextBox("00:00", font_size=18, text_color="white")
-
         self.add(self.close_icon, APP_CONTAINER_WIDTH - 10, 10)
-        self.add(self.time, APP_CONTAINER_WIDTH - self.close_icon.width() - 20, 20)
 
-        self.update_time()
-
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self.update_time)
-        self._timer.start(TIME_UPDATE_INTERVAL_MS)
+        if ENABLE_TIME_DISPLAY:
+            self.time = TextBox("00:00", font_size=18, text_color="white")
+            self.add(self.time, APP_CONTAINER_WIDTH - self.close_icon.width() - 20, 20)
+            self.update_time()
+            self._timer = QTimer(self)
+            self._timer.timeout.connect(self.update_time)
+            self._timer.start(TIME_UPDATE_INTERVAL_MS)
 
     def on_home_clicked(self) -> None:
         """
@@ -128,23 +126,32 @@ class RavenApp(Container):
         This method is called when the home/close button is clicked.
         It shuts down the application by calling sys.exit(0).
 
-        Note:
-            This is a hard exit and should be used carefully in production.
-            Consider implementing proper cleanup before exiting.
         """
         try:
             log.info(
                 "Close button clicked - shutting down app...", extra={"console": True}
             )
-            # QApplication.quit()
-            sys.exit(0)
+            log.info("RAVEN APP READY EXITED SIGNAL", extra={"console": True})
+            win = self.window()
+            if win is not None:
+                win.close()
+            app = QApplication.instance()
+            if app is not None:
+                app.quit()
         except Exception as e:
             log.error(
                 f"Error during app shutdown: {e}",
                 exc_info=True,
                 extra={"console": True},
             )
-            # Force exit even if there's an error
+            try:
+                if QApplication.instance() is not None:
+                    QApplication.instance().quit()
+            except Exception as e:
+                log.warning(
+                    f"Error quitting application's qt instance: {e}", exc_info=True
+                )
+                pass
             os._exit(1)
 
     def update_time(self) -> None:

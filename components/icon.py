@@ -19,12 +19,9 @@ optional bottom text display.
 """
 
 # Standard library imports
-import json
 import math
 import os
-import platform
 from functools import partial
-from pathlib import Path
 from typing import Any, Callable, Optional
 
 # PySide6 imports
@@ -85,7 +82,7 @@ class Icon(QWidget):
         corner_radius (int): Corner curvature for rounded-rect mode. Defaults to theme.borders.corner_radius.
         outline_width (int): Width of the circular/rectangular outline stroke. Defaults to 6.
         outline_color (str): Color of the circular/rectangular outline stroke as string. Defaults to theme.borders.highlight_color_icon.
-        scale_by (float): Scaling offset used for hover animation (e.g., 0.1 for 10% shrinkage). Defaults to 0.1.
+        scale_by (float): Scaling offset used for hover animation (e.g., 0.1 for 10% shrinkage). Defaults to 0.08.
         scale_step (float): Increment step of scaling per frame. Defaults to 0.01.
         fps (int): Frames per second for animation timers.
         delay_time (int): Delay time in milliseconds before starting animations. Defaults to 500.
@@ -96,6 +93,7 @@ class Icon(QWidget):
         enable_hover_sound (bool): Enable audio feedback on hover. Defaults to True. Disabled on Linux.
         enable_click_sound (bool): Enable audio feedback on click. Defaults to True. Disabled on Linux.
         bottom_text (str): Optional text displayed below the icon. Defaults to "".
+        bottom_text_spacing (int): Vertical spacing in pixels between the icon and bottom text. Defaults to 0.
         disabled (bool): If True, icon is disabled and won't respond to clicks or hover. Defaults to False.
     """
 
@@ -114,7 +112,7 @@ class Icon(QWidget):
         corner_radius: int = theme.borders.corner_radius,
         outline_width: int = theme.borders.highlight_width + 2,
         outline_color: str = theme.borders.highlight_color_icon,
-        scale_by: float = 0.1,
+        scale_by: float = 0.08,
         scale_step: float = 0.01,
         fps: int = ICON_FPS,
         delay_time: int = 500,
@@ -125,6 +123,7 @@ class Icon(QWidget):
         enable_hover_sound: bool = False,
         enable_click_sound: bool = False,
         bottom_text: str = "",
+        bottom_text_spacing: int = 0,
         disabled: bool = False,
     ) -> None:
         """
@@ -156,6 +155,7 @@ class Icon(QWidget):
         self.outline_color: QColor = to_qcolor(outline_color)
         self.outline_color_bg: QColor = to_qcolor(background_outline_color)
         self.bottom_text: str = bottom_text
+        self.bottom_text_spacing: int = int(bottom_text_spacing)
         self.bottom_text_visible: bool = bool(bottom_text)
         self.delay_time = delay_time
 
@@ -443,7 +443,7 @@ class Icon(QWidget):
             self.bottom_text, max_word_len=DEFAULT_MAX_WORD_LEN
         )
 
-        y_offset = self.size
+        y_offset = self.size + self.bottom_text_spacing
         text_rect = QRectF(0, y_offset, self.width(), self.height() - y_offset)
 
         painter.drawText(

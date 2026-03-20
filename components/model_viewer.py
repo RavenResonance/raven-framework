@@ -12,7 +12,6 @@
 
 import ctypes
 import os
-import sys
 from math import cos, radians, sin
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -24,6 +23,9 @@ from PySide6.QtGui import QCloseEvent
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
+from ..helpers.logger import get_logger
+
+# Local imports
 from ..helpers.utils_light import is_raven_device
 
 IS_RAVEN_DEVICE = is_raven_device()
@@ -32,8 +34,6 @@ if IS_RAVEN_DEVICE:
     # Ensure GLES2 symbols when on embedded
     from OpenGL.GLES2 import *
 
-# Local imports
-from ..helpers.logger import get_logger
 
 log = get_logger("ModelViewer")
 
@@ -705,9 +705,7 @@ class ModelRenderer(QOpenGLWidget):
 
         num_vertices = len(positions)
         if colors is None:
-            colors = (
-                np.ones((num_vertices, 3), dtype=np.float32) * DEFAULT_VERTEX_COLOR
-            )
+            colors = np.ones((num_vertices, 3), dtype=np.float32) * DEFAULT_VERTEX_COLOR
         else:
             if colors.ndim == 1:
                 colors = colors.reshape(-1, 3)
@@ -742,13 +740,15 @@ class ModelRenderer(QOpenGLWidget):
             index_offset = 0
             self._material_groups_data = []
             for mat_data in material_groups_raw:
-                self._material_groups_data.append({
-                    "indices": mat_data["indices"],
-                    "count": mat_data["count"],
-                    "texture_path": mat_data.get("texture_path"),
-                    "name": mat_data["name"],
-                    "index_offset": index_offset,
-                })
+                self._material_groups_data.append(
+                    {
+                        "indices": mat_data["indices"],
+                        "count": mat_data["count"],
+                        "texture_path": mat_data.get("texture_path"),
+                        "name": mat_data["name"],
+                        "index_offset": index_offset,
+                    }
+                )
                 index_offset += mat_data["count"]
         else:
             has_texture = texcoords is not None and texture_path is not None
@@ -771,7 +771,9 @@ class ModelRenderer(QOpenGLWidget):
             self._interleaved_flat = interleaved.ravel().astype(np.float32)
             self._is_multi_material = False
             self._indices_uint32 = (
-                indices.astype(np.uint32) if indices is not None else np.array([], dtype=np.uint32)
+                indices.astype(np.uint32)
+                if indices is not None
+                else np.array([], dtype=np.uint32)
             )
             self._index_count = len(self._indices_uint32)
             self._texture_path = texture_path if has_texture else None

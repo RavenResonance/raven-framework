@@ -17,8 +17,6 @@ This module provides a customizable clickable widget with animated scaling, opti
 background images, and embedded content widgets.
 """
 
-import json
-from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QEvent, QRectF, Qt, QTimer, Signal

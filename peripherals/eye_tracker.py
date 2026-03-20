@@ -61,23 +61,31 @@ class EyeTracker:
             try:
                 app = QApplication.instance()
                 if app is None:
-                    log.warning("EyeTracker: QApplication not available, returning None")
+                    log.warning(
+                        "EyeTracker: QApplication not available, returning None"
+                    )
                     return None
-                
+
                 global_pos = QCursor.pos()
-                
+
                 target_widget = None
                 for widget in app.allWidgets():
                     if widget.isVisible():
-                        if hasattr(widget, 'width') and hasattr(widget, 'height'):
-                            if widget.width() == DISPLAY_RESOLUTION[0] and widget.height() == DISPLAY_RESOLUTION[1]:
+                        if hasattr(widget, "width") and hasattr(widget, "height"):
+                            if (
+                                widget.width() == DISPLAY_RESOLUTION[0]
+                                and widget.height() == DISPLAY_RESOLUTION[1]
+                            ):
                                 target_widget = widget
                                 break
                         if widget.isWindow():
-                            if hasattr(widget, 'windowTitle') and 'Raven App' in widget.windowTitle():
+                            if (
+                                hasattr(widget, "windowTitle")
+                                and "Raven App" in widget.windowTitle()
+                            ):
                                 target_widget = widget
                                 break
-                
+
                 if target_widget:
                     local_pos = target_widget.mapFromGlobal(global_pos)
                     x, y = local_pos.x(), local_pos.y()
@@ -87,6 +95,7 @@ class EyeTracker:
                     return (x, y)
             except Exception as e:
                 log.error(
-                    f"Error getting cursor position in simulator mode: {e}", exc_info=True
+                    f"Error getting cursor position in simulator mode: {e}",
+                    exc_info=True,
                 )
                 return None
