@@ -1,17 +1,17 @@
 # AGENTS.md - Raven Framework
 
-This file provides comprehensive documentation for AI coding agents working with the Raven Framework. It contains all essential information about components, API, patterns, and best practices for building gaze-based applications for Raven Glass.
+This file provides comprehensive documentation for AI coding agents working with the Raven Framework. It contains all essential information about components, API, patterns, and best practices for building gaze-based applications for Raven Prism.
 
 ## Project Overview
 
-Raven Framework is a comprehensive UI framework and API for building gaze-based applications for Raven Glass. It provides:
+Raven Framework is a comprehensive UI framework and API for building gaze-based applications for Raven Prism. It provides:
 - Gaze-based interactions (buttons, scrolling with eyes)
 - Voice input
-- Extensive sensor suite (eye tracking, cameras, IMUs, microphones)
+- Extensive sensor suite (eye control, cameras, IMUs, microphones)
 - Modern UI components built on Python
 - Media handling and AI integration
 
-We are Raven Resonance, a small team building AR glasses for all-day wear. [Raven Glass v1](https://raven.computer/) hardware will be out soon and runs RavenOS, a Linux-based operating system. This repo contains a preview of Raven Framework and is the first part of the Raven SDK. We would love to hear your feedback in our [Discord community](https://raven.computer/s/discord)!
+We are Raven Resonance, a team of engineers and designers who have built and used wearable computers for years. [Raven Prism 1] will be out soon and runs RavenOS, a Linux-based operating system designed for all-day wear. This repo contains a preview of Raven Framework and is the first part of the Raven SDK. We would love to hear your feedback in our [Discord community](https://raven.computer/s/discord)!
 
 **Repository:** https://github.com/RavenResonance/raven-framework  
 **Starter Projects:** https://github.com/RavenResonance/raven-starter-project
@@ -60,7 +60,7 @@ python main.py deploy
 ### Simulator Behavior
 
 When running in simulator mode:
-- **Cursor simulates eye gaze**: Cursor represents where you're looking (HID independent - mouse, trackpad, eye gaze, etc.)
+- **Cursor simulates eye gaze**: Cursor represents where you're looking (HID independent - mouse, touchpad, eye gaze, etc.)
 - **Click simulates interaction**: Clicking simulates double blink or dwell-to-click
 - **Black appears transparent**: Due to additive blending (waveguide display behavior)
 - **Show Simulator button**: Click to preview how app looks on actual waveguide display
@@ -381,7 +381,7 @@ from raven_framework.components.model_viewer import ModelViewer
 viewer = ModelViewer(model_path="assets/model.obj", width=400, height=400)
 ```
 
-**Note:** Raven Glass only supports OpenGL ES 2.0, not Vulkan or OpenGL ES 3.x. The ModelViewer automatically uses the appropriate OpenGL context based on the platform.
+**Note:** Raven Prism only supports OpenGL ES 2.0, not Vulkan or OpenGL ES 3.x. The ModelViewer automatically uses the appropriate OpenGL context based on the platform.
 
 **Key params:** `model_path` (str), `width` (int), `height` (int)
 
@@ -565,15 +565,15 @@ if reading:
 **Methods:**
 - `get_reading() -> dict | None` (contains accelerometer, gyroscope, magnetometer)
 
-### EyeTracker
+### EyeControl
 
 **Note:** Cannot be simulated in simulator mode.
 
 ```python
-from raven_framework.peripherals.eye_tracker import EyeTracker
+from raven_framework.peripherals.eye_control import EyeControl
 
-tracker = EyeTracker()
-position = tracker.get_gaze_position()  # Returns Tuple[int, int] | None
+eye = EyeControl()
+position = eye.get_gaze_position()  # Returns Tuple[int, int] | None
 if position:
     x, y = position
 ```
@@ -700,19 +700,19 @@ Helper class for OpenAI API integration.
 ```python
 from raven_framework.helpers.open_ai_helper import OpenAiHelper
 
-ai = OpenAiHelper(open_ai_key="my_open_ai_key")
+openai = OpenAiHelper(open_ai_key="my_open_ai_key")
 
 # Text response
-response = ai.get_text_response("Hello, how are you?")
+response = openai.get_text_response("Hello, how are you?")
 
 # Transcribe audio
-text = ai.transcribe_audio(wav_bytes)
+text = openai.transcribe_audio(wav_bytes)
 
 # Multimodal (text + image)
-response = ai.process_multimodal_with_image("What's in this image?", image_frame)
+response = openai.process_multimodal_with_image("What's in this image?", image_frame)
 
 # Text to speech
-audio_bytes = ai.generate_tts("Hello world", voice="alloy")
+audio_bytes = openai.generate_tts("Hello world", voice="alloy")
 ```
 
 **Params:** `open_ai_key` (str)
@@ -725,7 +725,7 @@ audio_bytes = ai.generate_tts("Hello world", voice="alloy")
 
 ## Hardware Specifications
 
-Raven Glass v1 hardware specifications:
+Raven Prism v1 hardware specifications:
 
 * **Operating System:** RavenOS (Linux-based)
 * **Processor:** Quad-core 64-bit ARM processor
@@ -743,11 +743,11 @@ Raven Glass v1 hardware specifications:
 
 ## Design Guidelines
 
-**CRITICAL:** These guidelines are essential for creating comfortable, usable applications on Raven Glass. Follow them strictly.
+**CRITICAL:** These guidelines are essential for creating comfortable, usable applications on Raven Prism. Follow them strictly.
 
 ### Core Design Philosophy
 
-Raven Glass is designed for **comfort, presence, and real-world awareness**. The UI should feel ambient, optional, and calm. If the UI feels distracting, it's failing.
+Raven Prism is designed for **comfort, presence, and real-world awareness**. The UI should feel ambient, optional, and calm. If the UI feels distracting, it's failing.
 
 **Key Principles:**
 - **Minimize everything**: Use very little text, minimal content, and very few buttons (only if absolutely needed)
@@ -778,7 +778,7 @@ Raven Glass is designed for **comfort, presence, and real-world awareness**. The
 - **Use minimal text** - don't use a lot of text
 - Prefer system fonts only
 - We suggest a visual angle range of **0.8° to 1.2°**, and **Title, Headline, and Body** fall within this range
-- For Raven Glass (720×720 display with 30° diagonal FOV), these translate to the following pixel values:
+- For Raven Prism (720×720 display with 30° diagonal FOV), these translate to the following pixel values:
   - **Title** - 38px (1.12° visual angle)
   - **Headline** - 33px (0.97° visual angle)
   - **Body** - 28px (0.83° visual angle)
@@ -828,7 +828,7 @@ Raven Glass is designed for **comfort, presence, and real-world awareness**. The
 - **Use very few buttons, only if you need them** - every button adds cognitive load
 - **Minimize the number of clicks users have to do** - design workflows to require as few interactions as possible
 - Use large targets (avoid dense layouts)
-- Eye tracking: ~2–3° accuracy - account for this in target sizing
+- Eye Control: ~2–3° accuracy - account for this in target sizing
 - **Dwell-to-click** (default) - gaze at button for set duration
 - **Double-blink** (default) - double blink to activate focused elements
 - Prefer voice input for longer responses rather than multiple button clicks
@@ -837,7 +837,7 @@ Raven Glass is designed for **comfort, presence, and real-world awareness**. The
 - Pagination is **strongly recommended** over scrolling - it minimizes eye movement and interaction cost
 - Traditional scrolling is discouraged due to eye fatigue and attention shifts
 - Use [scroll view](#scrollview) only when scrolling is absolutely necessary
-- Auto-scroll may work for passive content but requires visual tracking and can reduce comfort
+- Auto-scroll may work for passive content but requires sustained attention on moving content and can reduce comfort
 
 ### Best Practices Summary
 
@@ -1291,7 +1291,7 @@ class SimpleAiApp(RavenApp):
         self.mic = None
         self.speaker = None
         self.async_runner = None
-        # Track recording state
+        # Recording state flag
         self.is_recording = False
 
     def on_button_click(self):

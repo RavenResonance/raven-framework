@@ -3,11 +3,11 @@
 <img src="assets/documentation/logo/horizontal.png" width="100%" alt="Raven Framework Logo">
 
 
-A comprehensive UI framework and API for building gaze-based applications for Raven Glass. Take full advantage of the extensive sensor suite on Raven Glass including eye tracking, cameras, IMUs, microphones, and more. The framework features gaze-based interactions like buttons and scrolling with eyes, along with voice input, media handling, AI integration, and many more modern UI components—all built on Python for easy development.
+A comprehensive UI framework and API for building gaze-based applications for Raven Prism. Take full advantage of the extensive sensor suite on Raven Prism including eye control, cameras, IMUs, microphones, and more. The framework features gaze-based interactions like buttons and scrolling with eyes, along with voice input, media handling, AI integration, and many more modern UI components—all built on Python for easy development.
 
 > If this is your **first Raven application**, check out the [Raven Starter Project](https://github.com/RavenResonance/raven-starter-project) repository.
 
-The framework is being developed by Raven Resonance, a small team building AR glasses for all-day wear. [Raven Glass v1](https://raven.computer/) hardware will be out soon and runs RavenOS, a Linux-based operating system. This repo contains a preview of Raven Framework and is the first part of the Raven SDK. We would love to hear your feedback in our [Discord community](https://raven.computer/s/discord)!
+The framework is being developed by Raven Resonance, a team of engineers and designers who have built and used wearable computers for years. [Raven Prism 1] will be out soon and runs RavenOS, a Linux-based operating system designed for all-day wear. This repo contains a preview of Raven Framework and is the first part of the Raven SDK. We would love to hear your feedback in our [Discord community](https://raven.computer/s/discord)!
 
 `version = "1.0.2"`
 
@@ -76,7 +76,7 @@ if __name__ == "__main__":
     )
 ```
 
-Use `python main.py` (or `python3 main.py`) to run on desktop simulator, and `python main.py deploy` (or `python3 main.py deploy`) to run on Raven Glass. Make sure you input app ID and key for deployment; simulator can work without it.
+Use `python main.py` (or `python3 main.py`) to run on desktop simulator, and `python main.py deploy` (or `python3 main.py deploy`) to run on Raven Prism. Make sure you input app ID and key for deployment; simulator can work without it.
 
 Note: To close an app, use the home icon in the top right corner.
 
@@ -578,7 +578,7 @@ from raven_framework.components.model_viewer import ModelViewer
 viewer = ModelViewer(model_path="assets/model.obj", width=400, height=400)
 ```
 
-**Note:** Raven Glass only supports OpenGL ES 2.0, not Vulkan or OpenGL ES 3.x. The ModelViewer automatically uses the appropriate OpenGL context based on the platform.
+**Note:** Raven Prism only supports OpenGL ES 2.0, not Vulkan or OpenGL ES 3.x. The ModelViewer automatically uses the appropriate OpenGL context based on the platform.
 
 **Frequently used params:** `model_path` (str), `width` (int), `height` (int)
 
@@ -849,19 +849,19 @@ Frequently used methods:
 
 See detailed params and functions in `raven_framework/peripherals/imu.py`
 
-### Eye Tracker
+### Eye control
 
-Eye tracking sensor for gaze position detection. **Note:** Cannot be simulated in simulator mode.
+Gaze position input for Raven Prism. **Note:** Cannot be simulated in simulator mode.
 
 ```python
-from raven_framework.peripherals.eye_tracker import EyeTracker
+from raven_framework.peripherals.eye_control import EyeControl
 
-tracker = EyeTracker()
+eye = EyeControl()
 ```
 
 Get gaze position:
 ```python
-position = tracker.get_gaze_position()
+position = eye.get_gaze_position()
 if position:
     x, y = position
 ```
@@ -869,7 +869,7 @@ if position:
 Frequently used methods:
 - `get_gaze_position() -> Tuple[int, int] | None`: Get current gaze position as (x, y) coordinates
 
-See detailed params and functions in `raven_framework/peripherals/eye_tracker.py`
+See detailed params and functions in `raven_framework/peripherals/eye_control.py`
 
 ### Speaker
 
@@ -1037,27 +1037,27 @@ Helper class for OpenAI API integration.
 ```python
 from raven_framework.helpers.open_ai_helper import OpenAiHelper
 
-ai = OpenAiHelper(open_ai_key="my_open_ai_key")
+openai = OpenAiHelper(open_ai_key="my_open_ai_key")
 ```
 
 Get text response:
 ```python
-response = ai.get_text_response("Hello, how are you?")
+response = openai.get_text_response("Hello, how are you?")
 ```
 
 Transcribe audio:
 ```python
-text = ai.transcribe_audio(wav_bytes)
+text = openai.transcribe_audio(wav_bytes)
 ```
 
 Get image response:
 ```python
-response = ai.process_multimodal_with_image("What's in this image?", image_frame)
+response = openai.process_multimodal_with_image("What's in this image?", image_frame)
 ```
 
 Text to speech:
 ```python
-audio_bytes = ai.generate_tts("Hello world", voice="alloy")
+audio_bytes = openai.generate_tts("Hello world", voice="alloy")
 ```
 
 Using with Camera:
@@ -1070,8 +1070,8 @@ camera.open_camera()
 frame = camera.capture_camera_image()
 camera.close_camera()
 
-ai = OpenAiHelper(open_ai_key="my_open_ai_key")
-response = ai.process_multimodal_with_image("What's in this image?", frame)
+openai = OpenAiHelper(open_ai_key="my_open_ai_key")
+response = openai.process_multimodal_with_image("What's in this image?", frame)
 ```
 
 Using with Microphone and TextBox:
@@ -1085,9 +1085,9 @@ mic.start_recording()
 # ... wait for recording ...
 wav_bytes = mic.stop_recording()
 
-ai = OpenAiHelper(open_ai_key="my_open_ai_key")
-transcription = ai.transcribe_audio(wav_bytes)
-response = ai.get_text_response(f"Respond to this: {transcription}")
+openai = OpenAiHelper(open_ai_key="my_open_ai_key")
+transcription = openai.transcribe_audio(wav_bytes)
+response = openai.get_text_response(f"Respond to this: {transcription}")
 
 text_box = TextBox(text=response)
 ```
@@ -1097,8 +1097,8 @@ Using with Speaker:
 from raven_framework.peripherals.speaker import Speaker
 from raven_framework.helpers.open_ai_helper import OpenAiHelper
 
-ai = OpenAiHelper(open_ai_key="my_open_ai_key")
-audio_bytes = ai.generate_tts("Hello, this is a test", voice="alloy")
+openai = OpenAiHelper(open_ai_key="my_open_ai_key")
+audio_bytes = openai.generate_tts("Hello, this is a test", voice="alloy")
 
 speaker = Speaker()
 speaker.play_audio(audio_bytes)
@@ -1117,7 +1117,7 @@ See detailed params and functions in `raven_framework/helpers/open_ai_helper.py`
 
 ## Hardware Specifications
 
-Raven Glass v1 hardware specifications:
+Raven Prism v1 hardware specifications:
 
 * **Operating System:** RavenOS (Linux-based)
 * **Processor:** Quad-core 64-bit ARM processor
@@ -1135,7 +1135,7 @@ Raven Glass v1 hardware specifications:
 
 ## Building Apps Without the Python Framework
 
-Raven Glass runs RavenOS (which is based on Linux), so you can run essentially any ARM64 Linux program/runtime (Go, Rust, Node, C/C++, etc.)—you are not limited to this Python framework. The platform has a default runtime entrypoint at [`core/run.sh`](core/run.sh). By default it runs `python3 main.py` (or `python3 main.pyc` if present). If your app provides its own `run.sh`, that will override the default. Before choosing a stack, review the [Hardware Specifications](#hardware-specifications) and note the display is 720×720 (see [Designing for Raven OS](#designing-for-raven-os)). 
+Raven Prism runs RavenOS (which is based on Linux), so you can run essentially any ARM64 Linux program/runtime (Go, Rust, Node, C/C++, etc.)—you are not limited to this Python framework. The platform has a default runtime entrypoint at [`core/run.sh`](core/run.sh). By default it runs `python3 main.py` (or `python3 main.pyc` if present). If your app provides its own `run.sh`, that will override the default. Before choosing a stack, review the [Hardware Specifications](#hardware-specifications) and note the display is 720×720 (see [Designing for Raven OS](#designing-for-raven-os)). 
 
 > **Note:** Additional support will be added to access glasses peripherals via Unix sockets. Like this SDK, all sockets will require special entitlement from the developer site for publishing, but not for development apps.
 
@@ -1191,7 +1191,7 @@ The desktop simulator approximates how colors will appear on the actual waveguid
 
 Raven provides an optimized system font scale. We suggest a visual angle range of **0.8° to 1.2°**, and **Title, Headline, and Body** fall within this range.
 
-For Raven Glass (720×720 px display with 30° diagonal FOV), these translate to the following pixel values:
+For Raven Prism (720×720 px display with 30° diagonal FOV), these translate to the following pixel values:
 
 * **Title** - 38px (1.12° visual angle)
 * **Headline** - 33px (0.97° visual angle)
@@ -1234,11 +1234,11 @@ Guidelines:
 * Assume accidental gaze is common
 * Users tend to look at bottom center most frequently. For rarely clicked items or critical actions (like going to home, scroll pagination) that need to be interacted with very intentionally, place them in the top right or right periphery to avoid accidental activation
 
-### 4. Input, Eye Tracking & Content Flow
+### 4. Input, gaze & content flow
 
-#### Eye Tracking
+#### Eye Control
 
-Eye tracking is the default mode of interaction for Raven Glass. It provides around ~2–3° accuracy (subject to change as hardware testing progresses). Use large targets, avoid dense layouts, and rely on framework‑provided controls.
+Eye Control is the default mode of interaction for Raven Prism. It provides around ~2–3° accuracy (subject to change as hardware testing progresses). Use large targets, avoid dense layouts, and rely on framework‑provided controls.
 
 #### Interaction
 
@@ -1249,7 +1249,7 @@ This is how buttons work in the framework:
 * **Dwell‑to‑click** (default) — gaze at a button for a set duration to activate
 * **Double‑blink** (default, evolving) — double blink to activate focused elements
 
-For getting long responses, you can use voice input with the [microphone](#microphone). Future input solutions are being explored for typing on Raven Glass.
+For getting long responses, you can use voice input with the [microphone](#microphone). Future input solutions are being explored for typing on Raven Prism.
 
 As a Linux‑based system, Raven supports third‑party Bluetooth HID devices (mouse, keyboard, rings, bands, accessibility tools). Interfaces must remain input‑agnostic.
 
@@ -1257,7 +1257,7 @@ As a Linux‑based system, Raven supports third‑party Bluetooth HID devices (m
 
 Traditional scrolling is discouraged due to eye fatigue and attention shifts, though it may sometimes be needed (for example, in a news app with multiple headlines to quickly glance at). Use [scroll view](#scroll-view) when scrolling is necessary.
 
-Raven supports pagination and continuous scrolling, but **pagination is recommended**. It minimizes eye movement and interaction cost. Auto‑scroll may work for passive content, but requires visual tracking and can reduce comfort.
+Raven supports pagination and continuous scrolling, but **pagination is recommended**. It minimizes eye movement and interaction cost. Auto‑scroll may work for passive content, but requires sustained attention on moving content and can reduce comfort.
 
 ## Examples
 
