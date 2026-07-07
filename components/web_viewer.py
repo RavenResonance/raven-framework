@@ -20,9 +20,11 @@ with Raven SDK applications.
 from typing import Optional
 
 from PySide6.QtCore import QSize, QUrl
+from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import QWidget
 
 from ..helpers.logger import get_logger
+from ..helpers.security import is_safe_media_url
 
 log = get_logger("WebViewer")
 
@@ -70,6 +72,11 @@ class WebViewer(QWidget):
                 log.error(error_msg, extra={"console": True})
                 raise ValueError(error_msg)
 
+            if not is_safe_media_url(url):
+                error_msg = f"url blocked for security reasons: {url!r}"
+                log.error(error_msg, extra={"console": True})
+                raise ValueError(error_msg)
+
             if QWebEngineView is None:
                 error_msg = "QWebEngineView is not available. PySide6.QtWebEngineWidgets may not be installed."
                 log.error(error_msg, extra={"console": True})
@@ -104,3 +111,13 @@ class WebViewer(QWidget):
         except Exception as e:
             log.error(f"Error getting size hint: {e}")
             return QSize(300, 200)
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        """Stop page loading and release the web view before closing."""
+        try:
+            if hasattr(self, "web_view") and self.web_view is not None:
+                self.web_view.stop()
+                self.web_view.setUrl(QUrl("about:blank"))
+        except Exception as e:
+            log.error(f"Error during WebViewer closeEvent cleanup: {e}", exc_info=True)
+        super().closeEvent(event)

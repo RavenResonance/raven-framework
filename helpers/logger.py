@@ -22,10 +22,89 @@ import json
 import logging
 import logging.handlers
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Tuple
+
+_REDACTED = "[REDACTED]"
+
+# Key names whose values must never appear in logs (case-insensitive).
+_SENSITIVE_KEY_NAMES = (
+    "token",
+    "app_key",
+    "password",
+    "secret",
+    "api_key",
+    "encryption_key",
+    "bearer",
+    "authorization",
+    "admin_encryption_key",
+    "hardware_device_id",
+    "open_ai_key",
+    "weather_api_key",
+    "jwt_secret",
+    "raven_token",
+)
+
+_SENSITIVE_KEY_PATTERN = "|".join(re.escape(name) for name in _SENSITIVE_KEY_NAMES)
+
+# HTTP auth-scheme header, key=value / key: value (JSON, env, query strings),
+# JWT-shaped strings.
+_REDACTION_PATTERNS: Tuple[Tuple[re.Pattern[str], str], ...] = (
+    # Matched before the generic key=value pattern below: a header like
+    # "Authorization: Basic <creds>" has the scheme as a separate token that
+    # the generic pattern would otherwise treat as the entire secret (since
+    # it stops at the first whitespace), leaving the real credential after
+    # it — the scheme word — unredacted.
+    (
+        re.compile(
+            r"\b(Bearer|Basic|Digest|Token|Negotiate)(\s+)[^\s\"']+",
+            re.IGNORECASE,
+        ),
+        rf"\1\2{_REDACTED}",
+    ),
+    (
+        re.compile(
+            rf"((?:{_SENSITIVE_KEY_PATTERN})\s*[=:]\s*)([\"']?)([^\"'\s,&}}]+)",
+            re.IGNORECASE,
+        ),
+        rf"\1\2{_REDACTED}",
+    ),
+    (
+        re.compile(
+            rf'("(?:{_SENSITIVE_KEY_PATTERN})"\s*:\s*")([^"]*)(")',
+            re.IGNORECASE,
+        ),
+        rf"\1{_REDACTED}\3",
+    ),
+    (
+        re.compile(
+            rf"('(?:{_SENSITIVE_KEY_PATTERN})'\s*:\s*')([^']*)(')",
+            re.IGNORECASE,
+        ),
+        rf"\1{_REDACTED}\3",
+    ),
+    (re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9._-]+\b"), _REDACTED),
+)
+
+
+def redact_secrets(text: str) -> str:
+    """Remove tokens, keys, and other secrets from a log message or traceback."""
+    if not text:
+        return text
+    redacted = text
+    for pattern, replacement in _REDACTION_PATTERNS:
+        redacted = pattern.sub(replacement, redacted)
+    return redacted
+
+
+def is_sensitive_config_key(key_path: Tuple[str, ...]) -> bool:
+    """Return True if a config key path should not be logged with its value."""
+    joined = ".".join(key_path).lower()
+    return any(name in joined for name in _SENSITIVE_KEY_NAMES)
+
 
 if sys.platform.startswith("win"):
     try:
@@ -134,7 +213,15 @@ logger = logging.getLogger(LOG_NAME)
 logger.setLevel(logging.DEBUG)
 logger.propagate = False
 
-formatter = logging.Formatter(
+
+class RedactingFormatter(logging.Formatter):
+    """Formatter that redacts secrets from the final log line (incl. tracebacks)."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        return redact_secrets(super().format(record))
+
+
+formatter = RedactingFormatter(
     fmt="%(asctime)s [%(levelname)s] [%(name)s] [%(module)s.%(funcName)s] -> %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )

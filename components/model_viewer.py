@@ -26,9 +26,9 @@ from PySide6.QtWidgets import QVBoxLayout, QWidget
 from ..helpers.logger import get_logger
 
 # Local imports
-from ..helpers.utils_light import is_raven_device
+from ..helpers.utils_light import uses_ravend_ipc
 
-IS_RAVEN_DEVICE = is_raven_device()
+IS_RAVEN_DEVICE = uses_ravend_ipc()
 
 if IS_RAVEN_DEVICE:
     # Ensure GLES2 symbols when on embedded
@@ -236,7 +236,7 @@ def load_obj_mesh(
                     indexed_normals.append(normals[vn_idx])
                 else:
                     indexed_normals.append([0.0, 0.0, 1.0])
-                # Track which material this vertex belongs to
+                # Associate each vertex with its material
                 vertex_material[vertex_idx] = mat_name
             face_indices.append(vertex_map[key])
 

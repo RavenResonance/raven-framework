@@ -39,11 +39,13 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
-# Local imports
 from ..helpers.font_utils import create_font
 from ..helpers.logger import get_logger
 from ..helpers.themes import RAVEN_CORE
 from ..helpers.utils_light import load_config, to_qcolor
+
+# Local imports
+from .icon import SCALE_THRESHOLD
 
 theme = RAVEN_CORE
 
@@ -59,7 +61,6 @@ LARGE_SIZE = (200, 70)
 DISABLED_OPACITY = 0.9
 
 # Animation constants
-SCALE_THRESHOLD = 0.005  # Threshold for scale animation completion
 FILL_DWELL_OFFSET = 0.1  # Offset for fill dwell progress ratio mapping
 HORIZONTAL_PADDING_1 = 3  # Horizontal padding for fill dwell rect
 HORIZONTAL_PADDING_2 = 3  # Horizontal padding for fill dwell clip path
@@ -86,7 +87,7 @@ class Button(QWidget):
         center_text (str): Text displayed centered in the button. Defaults to "Click Me".
         text_size (int): Font size for the center text. Defaults to theme.fonts.body.size.
         text_color (str): Color of the center text as string. Defaults to theme.fonts.body.color.
-        font (str): Font family ('libre_franklin'). Defaults to theme.fonts.body.family.
+        font (str): Font family (e.g. 'inter'). Defaults to theme.fonts.body.family.
         font_weight (str): Font weight, one of 'light', 'normal', 'medium', 'bold', or 'black'. Defaults to theme.fonts.body.weight.
         corner_radius (int): Radius for rounded corners. Defaults to theme.borders.corner_radius.
         outline_width (int): Width of the outline stroke. Defaults to 4.
@@ -100,8 +101,6 @@ class Button(QWidget):
         background_image_path (Optional[str]): File path to background image. Defaults to None.
         enable_quad_dwell (bool): Enables quad (rounded rect) dwell UI. Defaults to False.
         enable_click (bool): Enables dwell-click functionality. Defaults to True.
-        enable_hover_sound (bool): Enable audio feedback on hover. Defaults to True. Disabled on Linux.
-        enable_click_sound (bool): Enable audio feedback on click. Defaults to True. Disabled on Linux.
         dwell_background_outline_color (str): Outline color for quad dwell background as string. Defaults to theme.borders.highlight_quad_dwell_outline_color_button.
         use_gradient_border (bool): If True, renders border with gradient instead of solid color. Defaults to False.
         border_gradient_start_color (str): Start color for gradient border as string. Defaults to outline_color_bg.
@@ -144,8 +143,6 @@ class Button(QWidget):
         background_image_path: Optional[str] = None,
         enable_quad_dwell: bool = False,
         enable_click: bool = True,
-        enable_hover_sound: bool = False,
-        enable_click_sound: bool = False,
         dwell_background_outline_color: str = theme.borders.color,
         use_gradient_border: bool = theme.borders.use_gradient_border,
         border_gradient_start_color: Optional[
@@ -192,8 +189,6 @@ class Button(QWidget):
 
         self.enable_quad_dwell: bool = enable_quad_dwell
         self.enable_click: bool = enable_click
-        self.enable_hover_sound: bool = enable_hover_sound
-        self.enable_click_sound: bool = enable_click_sound
         self.use_fill_dwell: bool = use_fill_dwell
         self.disabled: bool = disabled
 
@@ -263,7 +258,7 @@ class Button(QWidget):
         self.target_scale: float = 1.0
         self.scale_step: float = float(scale_step)
 
-        # Dwell progress tracking
+        # Dwell progress state
         self.progress: float = 0.0
         self.max_progress: float = 100.0
         # Protect against division by zero
@@ -452,21 +447,6 @@ class Button(QWidget):
         self.scale_timer.timeout.connect(self.update_scale)
 
         self.setMouseTracking(True)
-        self.speaker = None
-        self.hover_sound = None
-        self.click_sound = None
-        if self.enable_click_sound or self.enable_hover_sound:
-            from ..peripherals.speaker import Speaker
-
-            self.speaker = Speaker()
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            audio_dir = os.path.join(
-                os.path.dirname(current_dir), _config["asset_paths"]["AUDIO_CLICK_PATH"]
-            )
-            with open(audio_dir, "rb") as f:
-                raven_click = f.read()
-            self.hover_sound = raven_click
-            self.click_sound = raven_click
 
     def closeEvent(self, event: QEvent) -> None:
         """
@@ -510,8 +490,6 @@ class Button(QWidget):
             self.progress_timer.stop()
             self.progress = 0.0
             self.clicked.emit()
-            if self.enable_click_sound and self.speaker and self.click_sound:
-                self.speaker.play_audio(self.click_sound)
         self.update()  # Trigger repaint to update progress UI
 
     def update_delay_progress(self) -> None:
@@ -570,8 +548,6 @@ class Button(QWidget):
         self.target_scale = 1.0
         if not self.scale_timer.isActive():
             self.scale_timer.start()
-        if self.enable_hover_sound and self.speaker and self.hover_sound:
-            self.speaker.play_audio(self.hover_sound)
         super().enterEvent(event)
 
     def leaveEvent(self, event: QEvent) -> None:
@@ -616,8 +592,6 @@ class Button(QWidget):
                 self.progress_timer.stop()
             self.progress = 0.0
             self.clicked.emit()
-            if self.enable_click_sound and self.speaker and self.click_sound:
-                self.speaker.play_audio(self.click_sound)
             self.update()
         super().mousePressEvent(event)
 
@@ -1342,8 +1316,12 @@ class Button(QWidget):
         Args:
             new_text (str): New text to display centered in the button.
         """
-        self.text = new_text
-        self.update()  # Triggers paintEvent to redraw with new text
+        try:
+            self.text = new_text
+            self.update()  # Triggers paintEvent to redraw with new text
+        except Exception as e:
+            log.error(f"Failed to set text on Button: {e}", exc_info=True)
+            raise
 
     def on_clicked(self, callback: Callable[..., Any], *args, **kwargs) -> None:
         """

@@ -20,7 +20,6 @@ optional bottom text display.
 
 # Standard library imports
 import math
-import os
 from functools import partial
 from typing import Any, Callable, Optional
 
@@ -51,12 +50,16 @@ log = get_logger("Icon")
 
 # Load configuration
 _config = load_config()
+_icon_cfg = _config["icon"]
 
 # Constants
-DEFAULT_EXTRA_HEIGHT = 140  # Max height in pixels for bottom text area
-DEFAULT_EXTRA_WIDTH = 10  # Max width in pixels for bottom text area
-SCALE_THRESHOLD = 0.005  # Threshold for scale animation completion
-DEFAULT_MAX_WORD_LEN = 8  # Maximum word length before hyphenation
+DEFAULT_ICON_SIZE = _icon_cfg["DEFAULT_ICON_SIZE"]
+DEFAULT_EXTRA_WIDTH = _icon_cfg["DEFAULT_EXTRA_WIDTH"]
+DEFAULT_EXTRA_HEIGHT = _icon_cfg["DEFAULT_EXTRA_HEIGHT"]
+LABEL_FONT_SIZE_OFFSET = _icon_cfg["LABEL_FONT_SIZE_OFFSET"]
+SQUARE_CORNER_RADIUS_RATIO = _icon_cfg["SQUARE_CORNER_RADIUS_RATIO"]
+SCALE_THRESHOLD = _icon_cfg["SCALE_THRESHOLD"]
+DEFAULT_MAX_WORD_LEN = _icon_cfg["DEFAULT_MAX_WORD_LEN"]
 QT_DEGREES_TO_UNITS = _config["display"]["QT_DEGREES_TO_UNITS"]
 MAX_PROGRESS = 100.0  # Maximum progress value for dwell-click (percentage)
 ICON_FPS = _config["fps"]["UI_FPS"]
@@ -77,7 +80,7 @@ class Icon(QWidget):
         center_text (str): Text to display in the center of the icon. Defaults to "".
         text_size (int): Font size of the center text. Defaults to theme.fonts.body.size.
         text_color (str): Color of the center text as string. Defaults to theme.fonts.body.color.
-        font (str): Font family ('libre_franklin'). Defaults to theme.fonts.body.family.
+        font (str): Font family (e.g. 'inter'). Defaults to theme.fonts.body.family.
         font_weight (str): Font weight, one of 'light', 'normal', 'medium', 'bold', or 'black'. Defaults to theme.fonts.body.weight.
         corner_radius (int): Corner curvature for rounded-rect mode. Defaults to theme.borders.corner_radius.
         outline_width (int): Width of the circular/rectangular outline stroke. Defaults to 6.
@@ -90,8 +93,6 @@ class Icon(QWidget):
         background_outline_color (str): Outline color shown on hover (rounded rect mode) as string. Defaults to theme.basic_palette.gray.
         is_square (bool): Whether to use a rounded rectangle (True) or circle (False). Defaults to False.
         enable_click (bool): Whether to allow dwell-based clicking. Defaults to True.
-        enable_hover_sound (bool): Enable audio feedback on hover. Defaults to True. Disabled on Linux.
-        enable_click_sound (bool): Enable audio feedback on click. Defaults to True. Disabled on Linux.
         bottom_text (str): Optional text displayed below the icon. Defaults to "".
         bottom_text_spacing (int): Vertical spacing in pixels between the icon and bottom text. Defaults to 0.
         disabled (bool): If True, icon is disabled and won't respond to clicks or hover. Defaults to False.
@@ -102,7 +103,7 @@ class Icon(QWidget):
     def __init__(
         self,
         background_image_path: Optional[str] = None,
-        size: int = 80,
+        size: int = DEFAULT_ICON_SIZE,
         background_color: str = theme.basic_palette.black,
         center_text: str = "",
         text_size: int = theme.fonts.body.size,
@@ -120,8 +121,6 @@ class Icon(QWidget):
         background_outline_color: str = theme.basic_palette.gray,
         is_square: bool = False,
         enable_click: bool = True,
-        enable_hover_sound: bool = False,
-        enable_click_sound: bool = False,
         bottom_text: str = "",
         bottom_text_spacing: int = 0,
         disabled: bool = False,
@@ -136,12 +135,12 @@ class Icon(QWidget):
         self.is_square: bool = is_square
         self.size: int = int(size)
         self.corner_radius: float = (
-            float(corner_radius) if corner_radius is not None else self.size / 4
+            float(corner_radius)
+            if corner_radius is not None
+            else self.size * SQUARE_CORNER_RADIUS_RATIO
         )
         self.full_diameter: int = self.size
         self.enable_click: bool = enable_click
-        self.enable_hover_sound: bool = enable_hover_sound
-        self.enable_click_sound: bool = enable_click_sound
         self.disabled: bool = disabled
 
         # Visual properties
@@ -223,21 +222,6 @@ class Icon(QWidget):
         self.scale_timer.timeout.connect(self.animate_scale)
 
         self.setMouseTracking(True)
-        self.speaker = None
-        self.hover_sound = None
-        self.click_sound = None
-        if self.enable_click_sound or self.enable_hover_sound:
-            from ..peripherals.speaker import Speaker
-
-            self.speaker = Speaker()
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            audio_dir = os.path.join(
-                os.path.dirname(current_dir), _config["asset_paths"]["AUDIO_CLICK_PATH"]
-            )
-            with open(audio_dir, "rb") as f:
-                raven_click = f.read()
-            self.hover_sound = raven_click
-            self.click_sound = raven_click
 
     def closeEvent(self, event: QEvent) -> None:
         """
@@ -283,8 +267,6 @@ class Icon(QWidget):
         self.target_scale = 1.0
         if not self.scale_timer.isActive():
             self.scale_timer.start()
-        if self.enable_hover_sound and self.speaker and self.hover_sound:
-            self.speaker.play_audio(self.hover_sound)
         super().enterEvent(event)
 
     def leaveEvent(self, event: QEvent) -> None:
@@ -328,8 +310,6 @@ class Icon(QWidget):
             self.progress_timer.stop()
             self.bottom_text_visible = False
             self.clicked.emit()
-            if self.enable_click_sound and self.speaker and self.click_sound:
-                self.speaker.play_audio(self.click_sound)
             self.update()
         super().mousePressEvent(event)
 
@@ -390,8 +370,6 @@ class Icon(QWidget):
             self.bottom_text_visible = False
             self.progress = 0.0
             self.clicked.emit()
-        if self.enable_click_sound and self.speaker and self.click_sound:
-            self.speaker.play_audio(self.click_sound)
         self.update()
 
     def paintEvent(self, event: QPaintEvent) -> None:
@@ -435,7 +413,11 @@ class Icon(QWidget):
 
         painter.setClipping(False)
         painter.setPen(self.text_color)
-        font = create_font(self.font, max(self.text_size - 2, 1), self.font_weight)
+        font = create_font(
+            self.font,
+            max(self.text_size - LABEL_FONT_SIZE_OFFSET, 1),
+            self.font_weight,
+        )
         painter.setFont(font)
 
         # Hyphenate before wrapping
@@ -658,8 +640,12 @@ class Icon(QWidget):
         Args:
             new_text (str): New text to display centered in the icon.
         """
-        self.text = new_text
-        self.update()
+        try:
+            self.text = new_text
+            self.update()
+        except Exception as e:
+            log.error(f"Failed to set text on Icon: {e}", exc_info=True)
+            raise
 
     def on_clicked(self, callback: Callable[..., Any], *args, **kwargs) -> None:
         """

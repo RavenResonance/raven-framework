@@ -37,7 +37,7 @@ def load_font_family(font_name: str) -> bool:
     Load a font family into QFontDatabase.
 
     Args:
-        font_name (str): Name of the font family ('libre_franklin', 'inter').
+        font_name (str): Name of the font family. Currently only 'inter' is supported.
 
     Returns:
         bool: True if fonts loaded successfully, False otherwise.
@@ -46,24 +46,9 @@ def load_font_family(font_name: str) -> bool:
         return _loaded_fonts[font_name]
 
     try:
-        # Get the raven_framework directory (parent of helpers)
         current_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-        if font_name == "libre_franklin":
-            font_dir = os.path.join(current_dir, "fonts", "Libre Franklin")
-            font_files = [
-                "LibreFranklin-Thin.ttf",
-                "LibreFranklin-ExtraLight.ttf",
-                "LibreFranklin-Light.ttf",
-                "LibreFranklin-Regular.ttf",
-                "LibreFranklin-Medium.ttf",
-                "LibreFranklin-SemiBold.ttf",
-                "LibreFranklin-Bold.ttf",
-                "LibreFranklin-ExtraBold.ttf",
-                "LibreFranklin-Black.ttf",
-            ]
-            family_name = "Libre Franklin"
-        elif font_name == "inter":
+        if font_name == "inter":
             font_dir = os.path.join(current_dir, "fonts", "Inter", "static")
             font_files = [
                 "Inter_24pt-Thin.ttf",
@@ -89,7 +74,6 @@ def load_font_family(font_name: str) -> bool:
 
         loaded_count = 0
         actual_family_name = None
-        font_db = QFontDatabase()
 
         for font_file in font_files:
             font_path = os.path.join(font_dir, font_file)
@@ -170,31 +154,26 @@ def get_font_family_name(font_name: str) -> str:
     Uses the cached family name that Qt actually registered after loading.
 
     Args:
-        font_name (str): Font name ('libre_franklin', 'inter').
+        font_name (str): Font name (e.g. 'inter').
 
     Returns:
         str: The actual font family name for Qt.
     """
-    # Check if we have the actual registered family name
     if font_name in _font_family_names:
         return _font_family_names[font_name]
 
-    # Fallback to expected names if not yet loaded
-    if font_name == "libre_franklin":
-        return "Libre Franklin"
-    elif font_name == "inter":
+    if font_name == "inter":
         return "Inter"
-    else:
-        log.warning(f"Unknown font family: {font_name}, falling back to system default")
-        return get_system_default_font_family()
+
+    log.warning(f"Unknown font family: {font_name}, falling back to system default")
+    return get_system_default_font_family()
 
 
 def preload_fonts() -> None:
     """
-    Preload all available fonts to avoid loading during paint events.
-    This should be called once at application startup for best performance.
+    Preload bundled fonts to avoid loading during paint events.
+    Should be called once at application startup for best performance.
     """
-    load_font_family("libre_franklin")
     load_font_family("inter")
 
 
@@ -204,7 +183,7 @@ def create_font(font: str, font_size: int, font_weight: str = "normal") -> QFont
     Size is in pixels; no DPI or device scaling is applied so 28 means 28px.
 
     Args:
-        font (str): Font family name ('libre_franklin', 'inter').
+        font (str): Font family name (e.g. 'inter').
         font_size (int): Font size in pixels.
         font_weight (str): Font weight ('light', 'normal', 'medium', 'bold', 'black').
 
@@ -215,7 +194,7 @@ def create_font(font: str, font_size: int, font_weight: str = "normal") -> QFont
     if cache_key in _font_cache:
         return _font_cache[cache_key]
 
-    valid_fonts = ["libre_franklin", "inter"]
+    valid_fonts = ["inter"]
     if font not in valid_fonts:
         log.warning(
             f"Font '{font}' not available. Valid options are: {valid_fonts}. Using system default."

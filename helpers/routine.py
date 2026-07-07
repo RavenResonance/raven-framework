@@ -58,7 +58,7 @@ class Routine:
         """
         try:
             interval_ms = int(interval_ms)  # Explicit cast to int
-            if interval_ms < 0:
+            if interval_ms <= 0:
                 error_msg = f"interval_ms must be positive, got {interval_ms}"
                 log.error(error_msg, extra={"console": True})
                 raise ValueError(error_msg)

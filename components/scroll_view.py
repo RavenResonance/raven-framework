@@ -21,7 +21,6 @@ from typing import Optional
 
 from PySide6.QtCore import (
     Property,
-    QEasingCurve,
     QEvent,
     QPoint,
     QPropertyAnimation,
@@ -32,9 +31,15 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QEnterEvent, QMouseEvent, QPainter, QPaintEvent, QPen
 from PySide6.QtWidgets import QFrame, QScrollArea, QVBoxLayout, QWidget
 
+from ..helpers.animation_utils import (
+    RavenCurveLike,
+    configure_property_animation,
+    make_property_animation,
+    resolve_curve,
+)
 from ..helpers.logger import get_logger
 from ..helpers.themes import RAVEN_CORE
-from ..helpers.utils_light import to_qcolor
+from ..helpers.utils_light import load_config, to_qcolor
 from .icon import Icon
 
 log = get_logger("ScrollView")
@@ -42,6 +47,20 @@ log = get_logger("ScrollView")
 DEFAULT_WIDTH = 480
 DEFAULT_HEIGHT = 720
 DEFAULT_MARGIN = 50
+
+_scroll_cfg = load_config()["animation"]["scroll_bar"]
+DEFAULT_SCROLL_ANIMATION_MS = _scroll_cfg["PAGE_SCROLL_MS"]
+DEFAULT_SCROLL_CURVE = resolve_curve(_scroll_cfg["PAGE_SCROLL_CURVE"])
+DEFAULT_PAGINATION_ANIMATION_MS = _scroll_cfg["PAGINATION_CONTAINER_SCALE_MS"]
+DEFAULT_PAGINATION_CURVE = resolve_curve(
+    _scroll_cfg["PAGINATION_CONTAINER_SCALE_CURVE"]
+)
+DEFAULT_PAGINATION_OUTLINE_FADE_MS = _scroll_cfg["PAGINATION_OUTLINE_FADE_MS"]
+DEFAULT_PAGINATION_OUTLINE_FADE_CURVE = resolve_curve(
+    _scroll_cfg["PAGINATION_OUTLINE_FADE_CURVE"]
+)
+DEFAULT_PAGINATION_DWELL_MS = _scroll_cfg["PAGINATION_DWELL_MS"]
+DEFAULT_PAGINATION_DWELL_HOVER_SCALE = _scroll_cfg["PAGINATION_DWELL_HOVER_SCALE"]
 
 
 theme = RAVEN_CORE
@@ -53,14 +72,16 @@ class PaginationContainer(QWidget):
     def __init__(
         self,
         parent=None,
-        dwell_hover_scale: float = 3.5,
-        dwell_time: int = 500,
+        dwell_hover_scale: float = DEFAULT_PAGINATION_DWELL_HOVER_SCALE,
+        dwell_time: int = DEFAULT_PAGINATION_DWELL_MS,
         outline_width: int = 2,
         outline_color: str = "white",
         base_corner_radius_percent: float = 0.5,
         hover_corner_radius_percent: float = 0.5,
-        animation_duration: int = 200,
-        outline_fade_duration: int = 200,
+        animation_duration_ms: int = DEFAULT_PAGINATION_ANIMATION_MS,
+        animation_curve: RavenCurveLike = DEFAULT_PAGINATION_CURVE,
+        outline_fade_duration_ms: int = DEFAULT_PAGINATION_OUTLINE_FADE_MS,
+        outline_fade_curve: RavenCurveLike = DEFAULT_PAGINATION_OUTLINE_FADE_CURVE,
     ):
         super().__init__(parent)
         self.setAttribute(Qt.WA_TranslucentBackground, False)
@@ -79,7 +100,14 @@ class PaginationContainer(QWidget):
         self.base_corner_radius_percent = base_corner_radius_percent
         self.hover_corner_radius_percent = hover_corner_radius_percent
         self.current_corner_radius = 0
-        self.outline_fade_duration = outline_fade_duration
+        self.outline_fade_duration_ms = max(0, int(outline_fade_duration_ms))
+        self.outline_fade_curve = resolve_curve(
+            outline_fade_curve, default=DEFAULT_PAGINATION_OUTLINE_FADE_CURVE
+        )
+        self.animation_duration_ms = max(0, int(animation_duration_ms))
+        self.animation_curve = resolve_curve(
+            animation_curve, default=DEFAULT_PAGINATION_CURVE
+        )
         self._outline_opacity = 0.0
 
         self.icons = []
@@ -92,11 +120,11 @@ class PaginationContainer(QWidget):
         self.dwell_time = dwell_time
 
         self.scale_animation = QPropertyAnimation(self, b"geometry", self)
-        self.scale_animation.setDuration(animation_duration)
-        self.scale_animation.setEasingCurve(QEasingCurve.OutCubic)
+        self.scale_animation.setDuration(self.animation_duration_ms)
+        self.scale_animation.setEasingCurve(self.animation_curve.to_qt())
 
         self._outline_fade_anim = QPropertyAnimation(self, b"outlineOpacity", self)
-        self._outline_fade_anim.setEasingCurve(QEasingCurve.OutCubic)
+        self._outline_fade_anim.setEasingCurve(self.outline_fade_curve.to_qt())
 
         def on_value_changed(value):
             if (
@@ -228,9 +256,13 @@ class PaginationContainer(QWidget):
         self.is_dwelling = True
         self.target_scale = 1.0
         self._outline_fade_anim.stop()
-        self._outline_fade_anim.setDuration(self.outline_fade_duration)
-        self._outline_fade_anim.setStartValue(self._outline_opacity)
-        self._outline_fade_anim.setEndValue(1.0)
+        configure_property_animation(
+            self._outline_fade_anim,
+            self._outline_opacity,
+            1.0,
+            self.outline_fade_duration_ms,
+            self.outline_fade_curve,
+        )
         self._outline_fade_anim.start()
         self.dwell_timer.start(self.dwell_time)
         super().enterEvent(event)
@@ -242,9 +274,13 @@ class PaginationContainer(QWidget):
         self.target_scale = 1.0
         self._animate_scale()
         self._outline_fade_anim.stop()
-        self._outline_fade_anim.setDuration(self.outline_fade_duration)
-        self._outline_fade_anim.setStartValue(self._outline_opacity)
-        self._outline_fade_anim.setEndValue(0.0)
+        configure_property_animation(
+            self._outline_fade_anim,
+            self._outline_opacity,
+            0.0,
+            self.outline_fade_duration_ms,
+            self.outline_fade_curve,
+        )
         self._outline_fade_anim.start()
         super().leaveEvent(event)
 
@@ -269,8 +305,13 @@ class PaginationContainer(QWidget):
         start_rect = QRect(start_x, start_y, start_width, start_height)
         end_rect = QRect(end_x, end_y, end_width, end_height)
 
-        self.scale_animation.setStartValue(start_rect)
-        self.scale_animation.setEndValue(end_rect)
+        configure_property_animation(
+            self.scale_animation,
+            start_rect,
+            end_rect,
+            self.animation_duration_ms,
+            self.animation_curve,
+        )
 
         def on_animation_finished():
             self.current_scale = self.target_scale
@@ -351,7 +392,8 @@ class ScrollView(QWidget):
         height (int): Height of the widget in pixels. Defaults to 720. If content_widget is provided
                       and default value is used, will be calculated as content_widget.height() + 100.
         scroll_step (int): Number of pages to scroll on dwell. Defaults to 1.
-        animation_duration (int): Duration (ms) of scroll animation. Defaults to 700.
+        animation_duration (int): Duration (ms) of scroll animation. Defaults from
+            ``animation.scroll_bar.PAGE_SCROLL_MS`` in framework config.
         parent (Optional[QWidget]): Optional parent widget. Defaults to None.
         scroll_start_dwell_time (int): Delay (ms) before starting dwell scroll. Defaults to 1500.
         scroll_continue_swell_time (int): Interval (ms) between repeated scrolls during dwell. Defaults to 1200.
@@ -367,8 +409,10 @@ class ScrollView(QWidget):
         pagination_container_horizontal_padding (int): Horizontal padding inside pagination container. Defaults to 10.
         pagination_container_vertical_padding (int): Vertical padding above and below circles in pagination container. Defaults to 10.
         pagination_indicator_color (str): Color of inactive pagination indicators. Defaults to "#3C3C3C".
-        pagination_dwell_hover_scale (float): Scale after dwell time. Defaults to 3.5.
-        pagination_dwell_time (int): Time (ms) before scaling to final hover scale. Defaults to 1000.
+        pagination_dwell_hover_scale (float): Scale after dwell time. Defaults from
+            ``animation.scroll_bar.PAGINATION_DWELL_HOVER_SCALE`` in framework config.
+        pagination_dwell_time (int): Time (ms) before scaling to final hover scale.
+            Defaults from ``animation.scroll_bar.PAGINATION_DWELL_MS`` in framework config.
         pagination_outline_width (int): Width of pagination container outline. Defaults to 2.
         pagination_outline_color (str): Color of pagination container outline. Defaults to "white".
         pagination_corner_radius_percent (float): Corner radius as percentage (0.0-1.0). Defaults to 0.5.
@@ -381,7 +425,7 @@ class ScrollView(QWidget):
         width: int = 480,
         height: int = 720,
         scroll_step: int = 1,
-        animation_duration: int = 700,
+        animation_duration: int = DEFAULT_SCROLL_ANIMATION_MS,
         parent: Optional[QWidget] = None,
         scroll_start_dwell_time: int = 1500,
         scroll_continue_swell_time: int = 1200,
@@ -397,12 +441,16 @@ class ScrollView(QWidget):
         pagination_container_horizontal_padding: int = 10,
         pagination_container_vertical_padding: int = 30,
         pagination_indicator_color: str = theme.basic_palette.gray,
-        pagination_dwell_hover_scale: float = 3.5,
-        pagination_dwell_time: int = 1000,
+        pagination_dwell_hover_scale: float = DEFAULT_PAGINATION_DWELL_HOVER_SCALE,
+        pagination_dwell_time: int = DEFAULT_PAGINATION_DWELL_MS,
         pagination_outline_width: int = 2,
         pagination_outline_color: str = theme.borders.color,
         pagination_corner_radius_percent: float = 0.5,
-        pagination_animation_duration: int = 300,
+        pagination_animation_duration: int = DEFAULT_PAGINATION_ANIMATION_MS,
+        scroll_animation_curve: RavenCurveLike = DEFAULT_SCROLL_CURVE,
+        pagination_animation_curve: RavenCurveLike = DEFAULT_PAGINATION_CURVE,
+        pagination_outline_fade_duration_ms: int = DEFAULT_PAGINATION_OUTLINE_FADE_MS,
+        pagination_outline_fade_curve: RavenCurveLike = DEFAULT_PAGINATION_OUTLINE_FADE_CURVE,
     ) -> None:
         """
         Initialize the ScrollView widget.
@@ -421,7 +469,10 @@ class ScrollView(QWidget):
         self.bar_width = 150
         self.bar_height = 7
         self.scroll_step = int(scroll_step)
-        self.animation_duration = int(animation_duration)
+        self.scroll_animation_duration_ms = max(0, int(animation_duration))
+        self.scroll_animation_curve = resolve_curve(
+            scroll_animation_curve, default=DEFAULT_SCROLL_CURVE
+        )
         self.scroll_start_dwell_time = int(scroll_start_dwell_time)
         self.enable_continuous_scroll = enable_continuous_scroll
         self.continuous_scroll_speed = int(continuous_scroll_speed)
@@ -444,7 +495,19 @@ class ScrollView(QWidget):
         self.pagination_outline_width = pagination_outline_width
         self.pagination_outline_color = pagination_outline_color
         self.pagination_corner_radius_percent = pagination_corner_radius_percent
-        self.pagination_animation_duration = pagination_animation_duration
+        self.pagination_animation_duration_ms = max(
+            0, int(pagination_animation_duration)
+        )
+        self.pagination_animation_curve = resolve_curve(
+            pagination_animation_curve, default=DEFAULT_PAGINATION_CURVE
+        )
+        self.pagination_outline_fade_duration_ms = max(
+            0, int(pagination_outline_fade_duration_ms)
+        )
+        self.pagination_outline_fade_curve = resolve_curve(
+            pagination_outline_fade_curve,
+            default=DEFAULT_PAGINATION_OUTLINE_FADE_CURVE,
+        )
         self.page_dots = []
         self.current_page = 0
 
@@ -527,7 +590,10 @@ class ScrollView(QWidget):
                 outline_color=self.pagination_outline_color,
                 base_corner_radius_percent=self.pagination_corner_radius_percent,
                 hover_corner_radius_percent=self.pagination_corner_radius_percent,
-                animation_duration=self.pagination_animation_duration,
+                animation_duration_ms=self.pagination_animation_duration_ms,
+                animation_curve=self.pagination_animation_curve,
+                outline_fade_duration_ms=self.pagination_outline_fade_duration_ms,
+                outline_fade_curve=self.pagination_outline_fade_curve,
             )
             self.pagination_container.hide()
             self.indicators = []
@@ -542,7 +608,10 @@ class ScrollView(QWidget):
             outline_color=self.pagination_outline_color,
             base_corner_radius_percent=self.pagination_corner_radius_percent,
             hover_corner_radius_percent=self.pagination_corner_radius_percent,
-            animation_duration=self.pagination_animation_duration,
+            animation_duration_ms=self.pagination_animation_duration_ms,
+            animation_curve=self.pagination_animation_curve,
+            outline_fade_duration_ms=self.pagination_outline_fade_duration_ms,
+            outline_fade_curve=self.pagination_outline_fade_curve,
         )
 
         self.indicators = []
@@ -552,6 +621,7 @@ class ScrollView(QWidget):
                 is_square=False,
                 size=self.pagination_circle_indicator_width,
                 background_color=self.pagination_indicator_color,
+                dwell_time=0.01,
             )
             circle_icon.setParent(self.pagination_container)
             circle_icon.on_clicked(self._on_pagination_click, i)
@@ -660,14 +730,12 @@ class ScrollView(QWidget):
         # Inner slim bar
         bar = QWidget(zone)
         bar.setObjectName("scroll_bar")
-        bar.setStyleSheet(
-            """
+        bar.setStyleSheet("""
             QWidget#scroll_bar {
                 background-color: lightgray;
                 border-radius: 3px;
             }
-        """
-        )
+        """)
 
         def center_bar():
             bar_w = self.bar_width
@@ -680,24 +748,20 @@ class ScrollView(QWidget):
 
         # Hover handlers for the entire zone (not just the bar)
         def on_enter(event):
-            bar.setStyleSheet(
-                """
+            bar.setStyleSheet("""
                 QWidget#scroll_bar {
                     background-color: white;
                     border-radius: 3px;
                 }
-            """
-            )
+            """)
 
         def on_leave(event):
-            bar.setStyleSheet(
-                """
+            bar.setStyleSheet("""
                 QWidget#scroll_bar {
                     background-color: lightgray;
                     border-radius: 3px;
                 }
-            """
-            )
+            """)
 
         zone.enterEvent = on_enter
         zone.leaveEvent = on_leave
@@ -789,14 +853,23 @@ class ScrollView(QWidget):
             page (int): Page index to scroll to (0-based).
         """
         viewport_height = self.scroll_area.viewport().height()
-        target_pos = page * viewport_height
+        bar = self.scroll_area.verticalScrollBar()
+        max_scroll = bar.maximum()
+        if page >= self.total_pages - 1:
+            target_pos = max_scroll
+        else:
+            target_pos = min(page * viewport_height, max_scroll)
         log.debug(f"Animating scroll to position: {target_pos}")
 
-        anim = QPropertyAnimation(self.scroll_area.verticalScrollBar(), b"value", self)
-        anim.setDuration(self.animation_duration)
-        anim.setStartValue(self.scroll_area.verticalScrollBar().value())
-        anim.setEndValue(target_pos)
-        anim.setEasingCurve(QEasingCurve.InOutQuad)
+        anim = make_property_animation(
+            self.scroll_area.verticalScrollBar(),
+            b"value",
+            self.scroll_area.verticalScrollBar().value(),
+            target_pos,
+            self.scroll_animation_duration_ms,
+            self.scroll_animation_curve,
+            self,
+        )
         anim.start()
 
         self.anim = anim  # Keep reference alive
@@ -938,6 +1011,7 @@ class ScrollView(QWidget):
             # Remove content widget if it exists
             if self.scroll_area.widget():
                 content_widget = self.scroll_area.widget()
+                content_widget.close()
                 self.scroll_area.setWidget(None)
                 content_widget.deleteLater()
                 log.debug("Content widget removed")
@@ -945,6 +1019,7 @@ class ScrollView(QWidget):
             # Clear pagination indicators
             if hasattr(self, "indicators"):
                 for indicator in self.indicators:
+                    indicator.close()
                     indicator.deleteLater()
                 self.indicators.clear()
                 self.page_dots.clear()
@@ -964,3 +1039,12 @@ class ScrollView(QWidget):
 
         except Exception as e:
             log.error(f"Error clearing scroll view: {e}", exc_info=True)
+
+    def closeEvent(self, event: QEvent) -> None:
+        """Stop all scroll timers before the widget closes."""
+        try:
+            log.debug("ScrollView closing - stopping timers")
+            self.stop_all_scroll()
+        except Exception as e:
+            log.error(f"Error stopping ScrollView timers: {e}", exc_info=True)
+        super().closeEvent(event)

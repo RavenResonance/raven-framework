@@ -44,6 +44,7 @@ from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from ..helpers.async_runner import AsyncRunner
 from ..helpers.logger import get_logger
+from ..helpers.security import is_safe_media_url
 from ..helpers.themes import RAVEN_CORE
 from ..helpers.utils_light import load_config
 
@@ -64,6 +65,38 @@ HTTP_USER_AGENT = _config["http"]["USER_AGENT"]
 DEFAULT_MOVIE_SPEED = 100  # Percentage: 100 = normal speed
 DOWNLOAD_CHUNK_SIZE = 256 * 1024  # 256 KB for streaming URL downloads
 FPS_REPORT_INTERVAL_SEC = 5  # seconds between FPS reports when show_fps_report is True
+MAX_MEDIA_REDIRECTS = 5
+
+
+def _validated_redirect_get(url: str, headers: dict, *, timeout: int):
+    """
+    GET url with redirects followed manually, re-validating each hop against
+    is_safe_media_url so a redirect can't be used to reach a blocked host.
+    """
+    import requests  # type: ignore
+
+    session = requests.Session()
+    current_url = url
+    for _ in range(MAX_MEDIA_REDIRECTS + 1):
+        if not is_safe_media_url(current_url):
+            raise ValueError(f"URL blocked for security reasons: {current_url!r}")
+        resp = session.get(
+            current_url,
+            headers=headers,
+            timeout=timeout,
+            allow_redirects=False,
+            stream=True,
+        )
+        if resp.is_redirect:
+            location = resp.headers.get("Location")
+            resp.close()
+            if not location:
+                raise ValueError("Redirect response missing Location header")
+            current_url = requests.compat.urljoin(current_url, location)
+            continue
+        resp.raise_for_status()
+        return resp
+    raise ValueError("Too many redirects")
 
 
 class MediaViewer(QWidget):
@@ -81,6 +114,11 @@ class MediaViewer(QWidget):
         pixmap_provided (Optional[QPixmap]): Optional QPixmap to display directly. Defaults to None.
         show_fps_report (bool): Whether to print FPS for debugging. Defaults to False.
         scale_mode (str): "cover" = fill widget and crop; "fit" = fit inside with letterbox. Defaults to "cover".
+        gif_loop_once (bool): If True, animated GIFs play one full cycle then stop.
+            Uses frame timing instead of QMovie.setLoopCount(1), which fails to display some GIFs.
+            Defaults to False (follow GIF metadata / infinite loop).
+        gif_autostart (bool): If False, GIF is loaded but does not play until start_gif() is called.
+            Defaults to True.
     """
 
     def __init__(
@@ -94,6 +132,8 @@ class MediaViewer(QWidget):
         pixmap_provided: Optional[QPixmap] = None,
         show_fps_report: bool = False,
         scale_mode: str = "cover",
+        gif_loop_once: bool = False,
+        gif_autostart: bool = True,
     ) -> None:
         """
         Initialize the MediaViewer widget.
@@ -133,6 +173,10 @@ class MediaViewer(QWidget):
         self.corner_radius = corner_radius
         self.media_path = media_path
         self.loop_video = loop_video
+        self._gif_loop_once = gif_loop_once
+        self._gif_autostart = gif_autostart
+        self._gif_once_stop_scheduled = False
+        self._gif_once_prev: Optional[int] = None
         self._show_fps_report = show_fps_report
         self._scale_mode: str = "cover" if scale_mode != "fit" else "fit"
 
@@ -191,27 +235,45 @@ class MediaViewer(QWidget):
         """
         Download a URL to a local temporary file and return the file path.
         """
+        if not is_safe_media_url(url):
+            raise ValueError(f"URL blocked for security reasons: {url!r}")
+
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
         tmp_path = tmp.name
         try:
             # Prefer requests if installed (used elsewhere in this repo), fall back to urllib.
             try:
-                import requests  # type: ignore
-
                 headers = {"User-Agent": HTTP_USER_AGENT}
-                with requests.get(
-                    url, headers=headers, timeout=15, allow_redirects=True, stream=True
-                ) as res:
-                    res.raise_for_status()
+                res = _validated_redirect_get(url, headers, timeout=15)
+                with res:
                     for chunk in res.iter_content(chunk_size=DOWNLOAD_CHUNK_SIZE):
                         if chunk:
                             tmp.write(chunk)
             except Exception:
-                from urllib.request import Request, urlopen
+                import urllib.error
+                import urllib.request
+                from urllib.request import Request
 
+                class _ValidatingRedirectHandler(urllib.request.HTTPRedirectHandler):
+                    """Re-validates every redirect hop against is_safe_media_url."""
+
+                    def redirect_request(self, req, fp, code, msg, hdrs, newurl):
+                        if not is_safe_media_url(newurl):
+                            raise urllib.error.HTTPError(
+                                newurl,
+                                code,
+                                "Redirect blocked for security reasons",
+                                hdrs,
+                                fp,
+                            )
+                        return super().redirect_request(
+                            req, fp, code, msg, hdrs, newurl
+                        )
+
+                opener = urllib.request.build_opener(_ValidatingRedirectHandler)
                 headers = {"User-Agent": HTTP_USER_AGENT}
                 req = Request(url, headers=headers)
-                with urlopen(req, timeout=15) as resp:  # nosec - user-provided URL
+                with opener.open(req, timeout=15) as resp:  # nosec - validated above
                     while True:
                         chunk = resp.read(DOWNLOAD_CHUNK_SIZE)
                         if not chunk:
@@ -363,7 +425,6 @@ class MediaViewer(QWidget):
             f"(frames={self._frame_count})"
         )
         log.debug(msg, extra={"console": True})
-        print(msg)
         self._frame_count = 0
 
     def load_media(self, path: str) -> None:
@@ -439,8 +500,13 @@ class MediaViewer(QWidget):
                     self.movie.setScaledSize(QSize(sw, sh))
                     self.movie.setCacheMode(QMovie.CacheAll)
                     self.movie.setSpeed(DEFAULT_MOVIE_SPEED)
+                    self._gif_once_stop_scheduled = False
+                    self._gif_once_prev = None
+                    if self._gif_loop_once:
+                        self.movie.frameChanged.connect(self._on_gif_play_once_frame)
                     self.media_widget.setMovie(self.movie)
-                    self.movie.start()
+                    if self._gif_autostart:
+                        self.movie.start()
                 else:
                     log.error("Invalid GIF file or failed to load.")
 
@@ -638,12 +704,51 @@ class MediaViewer(QWidget):
         except Exception as e:
             log.error(f"Error cleaning up video resources: {e}", exc_info=True)
 
+    def _disconnect_gif_play_once_handler(self) -> None:
+        if not self.movie:
+            return
+        try:
+            self.movie.frameChanged.disconnect(self._on_gif_play_once_frame)
+        except TypeError:
+            pass
+
+    def _on_gif_play_once_frame(self, _frame: int) -> None:
+        """Stop after one full pass (setLoopCount(1) breaks some GIFs in Qt)."""
+        m = self.movie
+        if m is None or not m.isValid() or self._gif_once_stop_scheduled:
+            return
+        n = m.frameCount()
+        cur = m.currentFrameNumber()
+        if n == 1 or (n > 1 and cur >= n - 1):
+            self._gif_once_stop_scheduled = True
+            delay = m.nextFrameDelay()
+            if delay < 1:
+                delay = 16
+            QTimer.singleShot(delay, self._finalize_gif_play_once)
+            return
+        if n <= 0:
+            prev = self._gif_once_prev
+            if prev is not None and cur < prev:
+                self._gif_once_stop_scheduled = True
+                QTimer.singleShot(0, self._finalize_gif_play_once)
+            self._gif_once_prev = cur
+
+    def _finalize_gif_play_once(self) -> None:
+        self._disconnect_gif_play_once_handler()
+        self._gif_once_stop_scheduled = False
+        self._gif_once_prev = None
+        if self.movie and self.movie.isValid():
+            self.movie.stop()
+
     def cleanup_gif_resources(self) -> None:
         """
         Clean up GIF-related resources to prevent memory leaks.
         """
         try:
             if self.movie:
+                self._disconnect_gif_play_once_handler()
+                self._gif_once_stop_scheduled = False
+                self._gif_once_prev = None
                 self.movie.stop()
                 self.movie.deleteLater()
                 self.movie = None
@@ -758,6 +863,18 @@ class MediaViewer(QWidget):
             QPixmap: Cropped and scaled pixmap.
         """
         return self._scaled_pixmap_cover(pixmap, target_width, target_height)
+
+    def start_gif(self) -> None:
+        """
+        Begin GIF playback (for GIFs created with gif_autostart=False).
+
+        No-op if there is no loaded GIF movie.
+        """
+        try:
+            if self.movie and self.movie.isValid():
+                self.movie.start()
+        except Exception as e:
+            log.error(f"Error in start_gif: {e}", exc_info=True)
 
     def play_video(self) -> None:
         """

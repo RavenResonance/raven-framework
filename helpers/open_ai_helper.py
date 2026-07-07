@@ -82,11 +82,12 @@ class OpenAiHelper:
                 file=(audio_filename, wav_bytes, audio_mime_type),
             )
             text = response.text.strip()
-            log.info(f"Transcribed text: {text}")
+            log.info(f"Transcription successful ({len(text)} chars)")
+            log.debug(f"Transcribed text: {text}")
             return text
         except Exception as e:
-            log.error(f"Error:Audio transcription failed: {e}", exc_info=True)
-            return f"Error:Audio transcription failed: {e}"
+            log.error(f"Audio transcription failed: {e}", exc_info=True)
+            return ""
 
     def get_text_response(self, prompt: str, model: str = "gpt-4o") -> str:
         """
@@ -108,11 +109,12 @@ class OpenAiHelper:
                 messages=[{"role": "user", "content": prompt}],
             )
             text = response.choices[0].message.content.strip()
-            log.info(f"Text response: {text}")
+            log.info(f"Text response received ({len(text)} chars)")
+            log.debug(f"Text response: {text}")
             return text
         except Exception as e:
-            log.error(f"Error: Text response failed: {e}", exc_info=True)
-            return f"Error:Text response failed: {e}"
+            log.error(f"Text response failed: {e}", exc_info=True)
+            return ""
 
     def generate_tts(
         self,
@@ -144,11 +146,11 @@ class OpenAiHelper:
                 response_format=response_format,
             )
             audio_bytes = response.read()
-            log.info("TTS generation successful")
-            return f"TTS generation successful: {audio_bytes}"
+            log.info(f"TTS generation successful ({len(audio_bytes)} bytes)")
+            return audio_bytes
         except Exception as e:
-            log.error(f"Error:TTS generation failed: {e}", exc_info=True)
-            return f"Error:TTS generation failed: {e}"
+            log.error(f"TTS generation failed: {e}", exc_info=True)
+            return b""
 
     def process_multimodal_with_image(
         self, prompt: str, image: np.ndarray, model: str = "gpt-4o"
@@ -165,8 +167,8 @@ class OpenAiHelper:
             str: Model's response text or empty string on failure.
         """
         if not self.client:
-            log.error("Error: OpenAI client not initialized")
-            return "Error:OpenAI client not initialized"
+            log.error("OpenAI client not initialized")
+            return ""
         try:
             base64_image = convert_ndarray_to_base64_image(image)
             log.debug("Image converted to base64.")
@@ -189,11 +191,12 @@ class OpenAiHelper:
                 ],
             )
             reply = response.choices[0].message.content.strip()
-            log.info(f"Multimodal response: {reply}")
+            log.info(f"Multimodal response received ({len(reply)} chars)")
+            log.debug(f"Multimodal response: {reply}")
             return reply
         except Exception as e:
-            log.error(f"Error: Multimodal processing failed: {e}", exc_info=True)
-            return f"Error: Multimodal processing failed: {e}"
+            log.error(f"Multimodal processing failed: {e}", exc_info=True)
+            return ""
 
     def structured_text_response(
         self,
@@ -219,8 +222,8 @@ class OpenAiHelper:
                   The actual return type depends on the structure parameter (e.g., dict, Pydantic model, etc.).
         """
         if not self.client:
-            log.error("Error: OpenAI client not initialized")
-            return "Error: OpenAI client not initialized"
+            log.error("OpenAI client not initialized")
+            return ""
         try:
             response = self.client.responses.parse(
                 model=model,
@@ -234,8 +237,9 @@ class OpenAiHelper:
                 text_format=structure,
             )
             output = response.output_parsed
-            log.info(f"Structured response received: {output}")
+            log.info("Structured response received")
+            log.debug(f"Structured response: {output}")
             return output
         except Exception as e:
-            log.warning(f"Error: Structured text response failed: {e}", exc_info=True)
-            return f"Error: Structured text response failed: {e}"
+            log.warning(f"Structured text response failed: {e}", exc_info=True)
+            return ""

@@ -14,7 +14,7 @@
 Heavy utility functions for Raven Framework.
 
 This module provides image and video processing utilities that require
-OpenCV and NumPy. Light utilities are imported from utils_light.
+OpenCV and NumPy.
 """
 
 import base64
@@ -25,18 +25,6 @@ import numpy as np
 from PySide6.QtGui import QImage, QPixmap
 
 from .logger import get_logger
-
-# Import light functions from utils_light (no OpenCV/numpy)
-from .utils_light import (
-    css_color,
-    hex_to_qcolor,
-    pascal_to_snake,
-    qcolor_to_hex,
-    snake_to_pascal_case,
-    snake_to_spaced_pascal,
-    spaced_pascal_to_snake,
-    to_qcolor,
-)
 
 log = get_logger("Utils")
 
@@ -243,6 +231,21 @@ def qimage_to_rgb_bytes(image: QImage) -> Optional[Tuple[bytes, int, int]]:
     except Exception:
         pass
     return None
+
+
+def qpixmap_to_rgb_bytes(pixmap: QPixmap) -> Optional[Tuple[bytes, int, int]]:
+    """
+    Convert QPixmap to contiguous RGB bytes (width * height * 3) via QImage.
+
+    Returns:
+        (bytes, width, height) or None if null or invalid.
+    """
+    if pixmap.isNull():
+        return None
+    image = pixmap.toImage()
+    if image.width() <= 0 or image.height() <= 0:
+        return None
+    return qimage_to_rgb_bytes(image)
 
 
 def rgb_bytes_to_png_bytes(

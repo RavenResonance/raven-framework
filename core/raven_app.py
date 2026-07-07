@@ -18,6 +18,7 @@ This module provides the main application container widget with header controls
 """
 
 import os
+import sys
 from typing import Optional
 
 from PySide6.QtCore import QDateTime, Qt, QTimer
@@ -26,9 +27,16 @@ from PySide6.QtWidgets import QApplication, QWidget
 from ..components.container import Container
 from ..components.icon import Icon
 from ..components.text_box import TextBox
+from ..helpers.animation_utils import fade_in, fade_out, resolve_curve
 from ..helpers.logger import get_logger
 from ..helpers.themes import RAVEN_CORE
-from ..helpers.utils_light import css_color, load_config, set_custom_circle_cursor
+from ..helpers.utils_light import (
+    css_color,
+    is_raven_device,
+    load_config,
+    set_custom_circle_cursor,
+)
+from ..peripherals.click_button import ClickButton
 
 theme = RAVEN_CORE
 
@@ -49,6 +57,8 @@ APP_CONTAINER_HEIGHT = APP_RESOLUTION[1]
 TIME_UPDATE_INTERVAL_MS = 1000  # milliseconds
 ENABLE_TIME_DISPLAY = False
 
+_wake_cfg = _config["animation"]["wake"]
+
 
 class RavenApp(Container):
     """
@@ -57,18 +67,22 @@ class RavenApp(Container):
 
     Args:
         parent (Optional[QWidget]): Parent widget. Defaults to None.
-        enable_gaze_marker (bool): Enable the gaze marker cursor. Defaults to True.
+        enable_gaze_marker (bool): Apply gaze marker cursor from config when True.
+            When False, the cursor is hidden. Defaults to True.
     """
 
     def __init__(
-        self, parent: Optional[QWidget] = None, enable_gaze_marker: bool = True
+        self,
+        parent: Optional[QWidget] = None,
+        enable_gaze_marker: bool = True,
     ) -> None:
         """
         Initialize the RavenApp container.
 
         Args:
             parent (Optional[QWidget]): Parent widget. Defaults to None.
-            enable_gaze_marker (bool): Enable the gaze marker cursor. Defaults to True.
+            enable_gaze_marker (bool): Apply gaze marker cursor from config when True.
+                When False, the cursor is hidden. Defaults to True.
         """
         super().__init__(
             parent=parent,
@@ -101,15 +115,31 @@ class RavenApp(Container):
             ((RAVEN_APP_HEIGHT - APP_CONTAINER_HEIGHT) / 2) + 10,
         )
 
-        # Setup icons
         here = os.path.dirname(__file__)
         home_icon_path = os.path.join(
             here, "..", _config["asset_paths"]["APPS_ICON_PATH"]
         )
 
-        self.close_icon = Icon(is_square=False, background_image_path=home_icon_path)
+        close_icon_size = 80
+        self.close_icon = Icon(
+            is_square=False, background_image_path=home_icon_path, size=close_icon_size
+        )
         self.close_icon.on_clicked(self.on_home_clicked)
-        self.add(self.close_icon, APP_CONTAINER_WIDTH - 10, 10)
+        self.add(self.close_icon, RAVEN_APP_WIDTH - close_icon_size - 3, 10)
+        self.close_icon.raise_()
+
+        # Catches gaze/mouse while asleep (simulator composite is mouse-transparent)
+        self._sleep_overlay = Container(
+            width=RAVEN_APP_WIDTH,
+            height=RAVEN_APP_HEIGHT,
+            background_color=theme.basic_palette.transparent,
+            border_width=0,
+            border_color=theme.basic_palette.black,
+            spacing=0,
+            corner_radius=0,
+        )
+        self.add(self._sleep_overlay, 0, 0)
+        self._sleep_overlay.hide()
 
         if ENABLE_TIME_DISPLAY:
             self.time = TextBox("00:00", font_size=18, text_color="white")
@@ -118,20 +148,116 @@ class RavenApp(Container):
             self._timer = QTimer(self)
             self._timer.timeout.connect(self.update_time)
             self._timer.start(TIME_UPDATE_INTERVAL_MS)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+        self.app_id = ""
+        self.is_awake = True
+        self._fade_ms = (
+            _wake_cfg["FADE_MS_RAVEN_DEVICE"]
+            if is_raven_device()
+            else _wake_cfg["FADE_MS_SIMULATOR"]
+        )
+        self._fade_curve = resolve_curve(_wake_cfg["FADE_CURVE"])
+        self._wake_brightness_gain = _wake_cfg["WAKE_BRIGHTNESS_GAIN"]
+        self._sleep_brightness_gain = _wake_cfg["SLEEP_BRIGHTNESS_GAIN"]
+
+    def bind_sleep_wake(self, app_id: str = "", app_key: str = "") -> None:
+        """Wire double-click (Enter in simulator) to fade the UI in and out."""
+        self.app_id = app_id
+        self.click_button = ClickButton(app_id=app_id, app_key=app_key)
+        self._click_button_routine = self.click_button.on_button_double_clicked(
+            self._toggle_sleep_wake, parent=self
+        )
+
+    def _toggle_sleep_wake(self) -> None:
+        if self.is_awake:
+            self.sleep()
+        else:
+            self.wake()
+
+    def _set_ui_interaction_blocked(self, blocked: bool) -> None:
+        """Block all in-app UI while asleep; wake remains on double-click only."""
+        if blocked:
+            self.close_icon.set_disabled(True)
+            self.app.setEnabled(False)
+            self._sleep_overlay.show()
+            self._sleep_overlay.raise_()
+            return
+        self._sleep_overlay.hide()
+        self.app.setEnabled(True)
+        self.close_icon.set_disabled(False)
+
+    def _fade_ui_for_sleep_wake(self, *, sleeping: bool) -> None:
+        """Fade the visible UI; simulator composites on a label, not the live widget."""
+        from .raven_simulator import SimulatorRunApp
+
+        win = self.window()
+        if isinstance(win, SimulatorRunApp):
+            if sleeping:
+                win.sleep_app_ui(self._fade_ms, self._fade_curve)
+            else:
+                win.wake_app_ui(self._fade_ms, self._fade_curve)
+            return
+        if sleeping:
+            fade_out(self, duration=self._fade_ms, curve=self._fade_curve)
+        else:
+            fade_in(self, duration=self._fade_ms, curve=self._fade_curve)
+
+    def _change_brightness_gain(self, brightness_gain: int) -> None:
+        if is_raven_device():
+            try:
+                from sys_utils.subprocess_manager import (
+                    run_lightengine_gain,
+                )  # type: ignore
+
+                run_lightengine_gain(brightness_gain)
+            except ImportError:
+                log.debug("subprocess_manager not available — brightness unchanged")
+            log.info(
+                f"Running lightengine --gain {brightness_gain}",
+                extra={"console": True},
+            )
+
+    def sleep(self) -> None:
+        """Fade out the entire app UI."""
+        if not self.is_awake:
+            return
+        self._set_ui_interaction_blocked(True)
+        self._fade_ui_for_sleep_wake(sleeping=True)
+        self._change_brightness_gain(self._sleep_brightness_gain)
+        self.is_awake = False
+        log.info("RavenApp UI asleep", extra={"console": True})
+
+    def wake(self) -> None:
+        """Fade in the entire app UI."""
+        if self.is_awake:
+            return
+        self._fade_ui_for_sleep_wake(sleeping=False)
+        self._change_brightness_gain(self._wake_brightness_gain)
+        self.is_awake = True
+        self._set_ui_interaction_blocked(False)
+        log.info("RavenApp UI awake", extra={"console": True})
 
     def on_home_clicked(self) -> None:
         """
         Handle home button click event.
 
-        This method is called when the home/close button is clicked.
-        It shuts down the application by calling sys.exit(0).
-
+        Closes the main window gracefully so RunApp.closeEvent can stop
+        timers and worker threads, then quits the application.
         """
         try:
             log.info(
                 "Close button clicked - shutting down app...", extra={"console": True}
             )
             log.info("RAVEN APP READY EXITED SIGNAL", extra={"console": True})
+
+            if is_raven_device():
+                try:
+                    from ..ipc.app_launch import send_app_exited
+
+                    send_app_exited(app_id=self.app_id, pid=os.getpid())
+                except Exception as e:
+                    log.debug(f"Failed to send app_exited IPC: {e}")
             win = self.window()
             if win is not None:
                 win.close()
@@ -147,12 +273,11 @@ class RavenApp(Container):
             try:
                 if QApplication.instance() is not None:
                     QApplication.instance().quit()
-            except Exception as e:
-                log.warning(
-                    f"Error quitting application's qt instance: {e}", exc_info=True
-                )
+            except Exception:
                 pass
-            os._exit(1)
+            # sys.exit (not os._exit) so atexit handlers and log flushing
+            # still run during shutdown.
+            sys.exit(1)
 
     def update_time(self) -> None:
         """Update the displayed time on the TextBox."""

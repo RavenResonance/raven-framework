@@ -335,6 +335,7 @@ class Container(QWidget):
         try:
             for child in self.findChildren(QWidget):
                 if child is not self._background:
+                    child.close()
                     child.setParent(None)
                     child.deleteLater()
             self.next_y = self.inner_margin

@@ -5,11 +5,13 @@
   },
   "fps": {
     "UI_FPS": 30,
-    "SIMULATOR_FPS": 30
+    "SIMULATOR_FPS": 20,
+    "CAST_FPS_RAVEN_DEVICE": 7,
+    "CAST_FPS_NON_RAVEN_DEVICE": 12
   },
   "deployment": {
-    "BASE_API_URL": "https://v1.apps.s.raven.computer/",
-    "ACCEPTING_DEPLOYMENTS": false,
+    "DEPLOY_ENDPOINT_URL": "https://api.s.raven.computer/developer/deploy/app/",
+    "ACCEPTING_DEPLOYMENTS": true,
     "PYTHON_VERSION_ON_RAVEN_DEVICE": "3.12.12"
   },
   "peripherals": {
@@ -20,13 +22,23 @@
   },
   "display": {
     "QT_DEGREES_TO_UNITS": 16,
-    "STANDARD_DPI": 96.0
+    "STANDARD_DPI": 96.0,
+    "_GAZE_MARKER_MODE_doc": "Options: circle (white gaze ring, for simulator/dev) | hidden (hide cursor)",
+    "GAZE_MARKER_MODE": "circle"
+  },
+  "icon": {
+    "DEFAULT_ICON_SIZE": 80,
+    "DEFAULT_EXTRA_WIDTH": 10,
+    "DEFAULT_EXTRA_HEIGHT": 140,
+    "LABEL_FONT_SIZE_OFFSET": 2,
+    "SQUARE_CORNER_RADIUS_RATIO": 0.25,
+    "SCALE_THRESHOLD": 0.005,
+    "DEFAULT_MAX_WORD_LEN": 8
   },
   "http": {
     "USER_AGENT": "Mozilla/5.0 (compatible; RavenOS/1.0; +https://raven.computer/)"
   },
   "asset_paths": {
-    "AUDIO_CLICK_PATH": "audio/raven_click.wav",
     "HOME_ICON_PATH": "assets/icons/home.png",
     "APPS_ICON_PATH": "assets/icons/apps.png",
     "ACTION_BUTTON_ICON_PATH": "assets/icons/action_button.png"
@@ -39,7 +51,9 @@
     "OVERLAY_BACKGROUND_VIDEO_DAY_PATH": "assets/overlay_background_videos/day.mp4",
     "OVERLAY_BACKGROUND_VIDEO_NIGHT_PATH": "assets/overlay_background_videos/night.mp4",
     "OVERLAY_BACKGROUND_VIDEO_OUTDOORS_PATH": "assets/overlay_background_videos/outdoor.mp4",
-    "RAW_MODE_TOOLTIP_TEXT": "The raw app that will render on Raven Glass. Use other modes for previewing how it will blend with background, note that performance other modes is relatively less due to real time blending."
+    "RAW_MODE_TOOLTIP_TEXT": "The raw app that will render on Raven Prism. Use other modes for previewing how it will blend with background, note that performance other modes is relatively less due to real time blending.",
+    "PRINT_SIMULATOR_PERFORMANCE": false,
+    "PRINT_CAST_PERFORMANCE": false
   },
   "logger": {
     "LOG_NAME": "raven_log",
@@ -52,5 +66,35 @@
     "BACKUP_COUNT": 5,
     "ENABLE_FILE_LOGGING": true,
     "ENABLE_CONSOLE_LOGGING": true
+  },
+  "ipc": {
+    "APP_LAUNCH_SOCKET_PATH": "/tmp/raven_app_launch.sock",
+    "APP_LAUNCHED_SIGNAL_DELAY_MS": 500,
+    "RAVEND_SOCKET_DIR": "/run/ravend",
+    "RAVEN_DEVICE_MARKER_PATH": "/data/raven/.is_raven_device"
+  },
+  "animation": {
+    "DEFAULT_CURVE": "IN_OUT_SINE",
+    "fade": {
+      "DURATION_MS": 750,
+      "CURVE": "IN_OUT_SINE"
+    },
+    "scroll_bar": {
+      "PAGE_SCROLL_MS": 700,
+      "PAGE_SCROLL_CURVE": "IN_OUT_SINE",
+      "PAGINATION_OUTLINE_FADE_MS": 200,
+      "PAGINATION_OUTLINE_FADE_CURVE": "IN_OUT_SINE",
+      "PAGINATION_CONTAINER_SCALE_MS": 300,
+      "PAGINATION_CONTAINER_SCALE_CURVE": "IN_OUT_SINE",
+      "PAGINATION_DWELL_MS": 900,
+      "PAGINATION_DWELL_HOVER_SCALE": 3.5
+    },
+    "wake": {
+      "FADE_MS_RAVEN_DEVICE": 500,
+      "FADE_MS_SIMULATOR": 750,
+      "FADE_CURVE": "IN_OUT_SINE",
+      "WAKE_BRIGHTNESS_GAIN": 20,
+      "SLEEP_BRIGHTNESS_GAIN": 0
+    }
   }
 }

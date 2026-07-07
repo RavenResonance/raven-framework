@@ -113,7 +113,7 @@ class Font:
     Args:
         size (int): Font size in points.
         weight (str): Font weight ('light', 'normal', 'medium', 'bold', 'black').
-        family (str): Font family ('libre_franklin').
+        family (str): Font family (e.g. 'inter').
         color (str): Font color hex code.
     """
 

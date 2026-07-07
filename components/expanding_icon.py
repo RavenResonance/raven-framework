@@ -40,6 +40,7 @@ theme = RAVEN_CORE
 
 # Load configuration
 _config = load_config()
+LABEL_FONT_SIZE_OFFSET = _config["icon"]["LABEL_FONT_SIZE_OFFSET"]
 ICON_FPS = _config["fps"]["UI_FPS"]
 
 log = get_logger("ExpandingIcon")
@@ -61,7 +62,7 @@ class ExpandingIcon(QWidget):
         background_image_path (str): File path for optional background image. Defaults to "".
         text_size (int): Font size for text. Defaults to theme.fonts.body.size.
         text_color (str): Color for bottom text rendering (CSS color string or name). Defaults to theme.fonts.body.color.
-        font (str): Font family ('libre_franklin'). Defaults to theme.fonts.body.family.
+        font (str): Font family (e.g. 'inter'). Defaults to theme.fonts.body.family.
         font_weight (str): Font weight, one of 'light', 'normal', 'medium', 'bold', or 'black'. Defaults to theme.fonts.body.weight.
         margin (int): Margin padding around content. Defaults to 20.
         content_widget (Optional[QWidget]): Optional widget to embed inside the expanding icon. Defaults to None.
@@ -288,7 +289,11 @@ class ExpandingIcon(QWidget):
         try:
             painter.setClipping(False)
             painter.setPen(self.text_color)
-            font = create_font(self.font, self.text_size - 2, self.font_weight)
+            font = create_font(
+                self.font,
+                max(self.text_size - LABEL_FONT_SIZE_OFFSET, 1),
+                self.font_weight,
+            )
             painter.setFont(font)
 
             fm = QFontMetrics(font)

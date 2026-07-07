@@ -1,4 +1,4 @@
-# Raven Framework (alpha v0.1)
+# Raven Framework (alpha v1.0.3)
 
 <img src="assets/documentation/logo/horizontal.png" width="100%" alt="Raven Framework Logo">
 
@@ -7,9 +7,9 @@ A comprehensive UI framework and API for building gaze-based applications for Ra
 
 > If this is your **first Raven application**, check out the [Raven Starter Project](https://github.com/RavenResonance/raven-starter-project) repository.
 
-The framework is being developed by Raven Resonance, a team of engineers and designers who have built and used wearable computers for years. [Raven Prism 1] will be out soon and runs RavenOS, a Linux-based operating system designed for all-day wear. This repo contains a preview of Raven Framework and is the first part of the Raven SDK. We would love to hear your feedback in our [Discord community](https://raven.computer/s/discord)!
+The framework is being developed by Raven Resonance, a team of engineers and designers who have built and used wearable computers for years. [Raven Prism 1](https://raven.computer) will be out soon and runs RavenOS, a Linux-based operating system designed for all-day wear. This repo contains a preview of Raven Framework and is the first part of the Raven SDK. We would love to hear your feedback in our [Discord community](https://raven.computer/s/discord)!
 
-`version = "1.0.2"`
+`version = "1.0.3"`
 
 
 ## Table of Contents
@@ -593,7 +593,7 @@ Reusable card components with various layouts and button configurations.
 Card with text content and a single button.
 
 ```python
-from raven_framework.cards import TextCardWithButton
+from raven_framework.components.cards import TextCardWithButton
 
 card = TextCardWithButton()
 ```
@@ -606,14 +606,14 @@ Frequently used params:
 - `button_text` (str): Text for the button
 - `on_button_click` (Callable): Optional callback function for button click
 
-See detailed params and functions in `raven_framework/cards.py`
+See detailed params and functions in `raven_framework/components/cards.py`
 
 #### Text Card With Two Buttons
 
 Card with text content and two buttons.
 
 ```python
-from raven_framework.cards import TextCardWithTwoButtons
+from raven_framework.components.cards import TextCardWithTwoButtons
 
 card = TextCardWithTwoButtons()
 ```
@@ -628,14 +628,14 @@ Frequently used params:
 - `on_button_1_click` (Callable): Optional callback function for first button click
 - `on_button_2_click` (Callable): Optional callback function for second button click
 
-See detailed params and functions in `raven_framework/cards.py`
+See detailed params and functions in `raven_framework/components/cards.py`
 
 #### Horizontal Text Card With Button
 
 Horizontal card with text and a button.
 
 ```python
-from raven_framework.cards import HorizontalTextCardWithButton
+from raven_framework.components.cards import HorizontalTextCardWithButton
 
 card = HorizontalTextCardWithButton()
 ```
@@ -648,14 +648,14 @@ Frequently used params:
 - `button_text` (str): Text for the button
 - `on_button_click` (Callable): Optional callback function for button click
 
-See detailed params and functions in `raven_framework/cards.py`
+See detailed params and functions in `raven_framework/components/cards.py`
 
 #### Horizontal Text Card
 
 Horizontal card with text only (no button).
 
 ```python
-from raven_framework.cards import HorizontalTextCard
+from raven_framework.components.cards import HorizontalTextCard
 
 card = HorizontalTextCard()
 ```
@@ -667,14 +667,14 @@ Frequently used params:
 - `container_width` (int): Width of the card container
 - `text_alignment` (str): Text alignment
 
-See detailed params and functions in `raven_framework/cards.py`
+See detailed params and functions in `raven_framework/components/cards.py`
 
 #### Media Card
 
 Card with media viewer, title, subtitle, and body text (no button).
 
 ```python
-from raven_framework.cards import MediaCard
+from raven_framework.components.cards import MediaCard
 
 card = MediaCard(image_path="assets/image.png")
 ```
@@ -689,14 +689,14 @@ Frequently used params:
 - `image_height` (int): Height of the image
 - `container_width` (int): Width of the card container
 
-See detailed params and functions in `raven_framework/cards.py`
+See detailed params and functions in `raven_framework/components/cards.py`
 
 #### Media Card With Button
 
 Card with media viewer, title, subtitle, body text, and a single button.
 
 ```python
-from raven_framework.cards import MediaCardWithButton
+from raven_framework.components.cards import MediaCardWithButton
 
 card = MediaCardWithButton(image_path="assets/image.png")
 ```
@@ -713,14 +713,14 @@ Frequently used params:
 - `container_width` (int): Width of the card container
 - `on_button_click` (Callable): Optional callback function for button click
 
-See detailed params and functions in `raven_framework/cards.py`
+See detailed params and functions in `raven_framework/components/cards.py`
 
 #### Media Card With Two Buttons
 
 Card with media viewer, title, subtitle, body text, and two buttons.
 
 ```python
-from raven_framework.cards import MediaCardWithTwoButtons
+from raven_framework.components.cards import MediaCardWithTwoButtons
 
 card = MediaCardWithTwoButtons(image_path="assets/image.png")
 ```
@@ -739,7 +739,7 @@ Frequently used params:
 - `on_button_1_click` (Callable): Optional callback function for first button click
 - `on_button_2_click` (Callable): Optional callback function for second button click
 
-See detailed params and functions in `raven_framework/cards.py`
+See detailed params and functions in `raven_framework/components/cards.py`
 
 #### Scrollable List Card
 
@@ -748,7 +748,7 @@ Card with a scrollable list of items, each with a button.
 <img src="assets/documentation/cards/8.png" width="450" alt="Scrollable List Card">
 
 ```python
-from raven_framework.cards import ScrollableListCard
+from raven_framework.components.cards import ScrollableListCard
 
 card = ScrollableListCard()
 ```
@@ -761,7 +761,7 @@ Frequently used params:
 - `card_height` (int): Height of the card container
 - `on_item_click` (List[Tuple[Callable, ...]]): Optional callback for item button clicks
 
-See detailed params and functions in `raven_framework/cards.py`
+See detailed params and functions in `raven_framework/components/cards.py`
 
 ## Peripherals
 

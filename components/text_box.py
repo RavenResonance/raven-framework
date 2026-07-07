@@ -35,6 +35,7 @@ log = get_logger("TextBox")
 _SIZE_HINT_HEIGHT_BUFFER_BASE = 2
 _SIZE_HINT_HEIGHT_BUFFER_PER_LINE = 2
 
+
 class TextBox(QLabel):
     """
     QLabel subclass with customizable font, color, alignment, word wrap, and optional fixed width.
@@ -46,7 +47,7 @@ class TextBox(QLabel):
                                   If provided, automatically sets text_color, font, font_size, and font_weight from theme.
                                   Defaults to None (uses body font as default).
         text_color (str): CSS color string or QColor-compatible color for text. Defaults to theme.fonts.body.color.
-        font (str): Font family ('libre_franklin'). Defaults to theme.fonts.body.family.
+        font (str): Font family (e.g. 'inter'). Defaults to theme.fonts.body.family.
         font_size (int): Font size in pixels. Defaults to theme.fonts.body.size.
         font_weight (str): Font weight, one of 'light', 'normal', 'medium', 'bold', or 'black'. Defaults to theme.fonts.body.weight.
         alignment (str): Text alignment, one of 'left', 'center', or 'right'. Defaults to 'left'.

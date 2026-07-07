@@ -14,6 +14,7 @@
 Card components for Raven Framework.
 
 This module provides reusable card components with various layouts and button configurations.
+auto_height uses APP_RESOLUTION[1] from config.json as the maximum card height.
 """
 
 from typing import Callable, List, Optional, Tuple, Union
@@ -21,6 +22,7 @@ from typing import Callable, List, Optional, Tuple, Union
 from PySide6.QtWidgets import QWidget
 
 from ..helpers.themes import RAVEN_CORE
+from ..helpers.utils_light import load_config
 from .button import Button
 from .container import Container
 from .horizontal_container import HorizontalContainer
@@ -31,6 +33,30 @@ from .text_box import TextBox
 from .vertical_container import VerticalContainer
 
 theme = RAVEN_CORE
+
+_config = load_config()
+MAX_AUTO_HEIGHT_PX = int(_config["resolution"]["APP_RESOLUTION"][1])
+
+
+def _clamp_auto_height(h: int) -> int:
+    return min(int(h), MAX_AUTO_HEIGHT_PX)
+
+
+def _intrinsic_height(widget: QWidget) -> int:
+    """Height needed to fit widget content (layout/sizeHint) after layout pass."""
+    widget.adjustSize()
+    return max(widget.sizeHint().height(), widget.height())
+
+
+def _overlay_button_y(main_h: int, button: Button) -> int:
+    """Y position for a button overlapping the bottom of the main content area."""
+    return int(main_h - (button.height() / 3))
+
+
+def _overlay_card_total_height(main_h: int, button: Button) -> int:
+    """Total card height when a single button is overlaid on the bottom of main content."""
+    btn_y = _overlay_button_y(main_h, button)
+    return int(btn_y + button.height())
 
 
 class TextCardWithButton(Container):
@@ -48,6 +74,7 @@ class TextCardWithButton(Container):
         on_button_click: Optional callback function for button click.
         text_alignment: Text alignment. Defaults to "left".
         text_font_size: Font size for the text. Defaults to theme.fonts.body.size.
+        auto_height: If True, set card height from content.
     """
 
     def __init__(
@@ -62,6 +89,7 @@ class TextCardWithButton(Container):
         on_button_click: Optional[Callable] = None,
         text_alignment: str = "left",
         text_font_size: Optional[int] = None,
+        auto_height: bool = False,
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent, width=container_width)
@@ -87,11 +115,20 @@ class TextCardWithButton(Container):
             self.button.on_clicked(on_button_click)
 
         self.add(main_container)
-        self.add(
-            self.button,
-            (container_width / 2) - (self.button.width() / 2),
-            main_container.height() - (self.button.height() / 3),
-        )
+        btn_x = (container_width / 2) - (self.button.width() / 2)
+        if auto_height:
+            main_h = _intrinsic_height(main_container)
+            btn_y = _overlay_button_y(main_h, self.button)
+            self.add(self.button, btn_x, btn_y)
+            self.setFixedHeight(
+                _clamp_auto_height(_overlay_card_total_height(main_h, self.button))
+            )
+        else:
+            self.add(
+                self.button,
+                btn_x,
+                main_container.height() - (self.button.height() / 3),
+            )
 
 
 class TextCardWithTwoButtons(Container):
@@ -112,6 +149,7 @@ class TextCardWithTwoButtons(Container):
         on_button_2_click: Optional callback function for second button click.
         text_alignment: Text alignment. Defaults to "left".
         text_font_size: Font size for the text. Defaults to theme.fonts.body.size.
+        auto_height: If True, set card height from content.
     """
 
     def __init__(
@@ -129,6 +167,7 @@ class TextCardWithTwoButtons(Container):
         on_button_2_click: Optional[Callable] = None,
         text_alignment: str = "left",
         text_font_size: Optional[int] = None,
+        auto_height: bool = False,
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent, width=container_width)
@@ -163,12 +202,26 @@ class TextCardWithTwoButtons(Container):
         start_x = (container_width / 2) - (total_buttons_width / 2)
 
         self.add(main_container)
-        self.add(button1, start_x, main_container.height() - (button1.height() / 3))
-        self.add(
-            button2,
-            start_x + button1.width() + button_spacing,
-            main_container.height() - (button2.height() / 3),
-        )
+        if auto_height:
+            main_h = _intrinsic_height(main_container)
+            btn_y = _overlay_button_y(main_h, button1)
+            self.add(button1, start_x, btn_y)
+            self.add(
+                button2,
+                start_x + button1.width() + button_spacing,
+                btn_y,
+            )
+            self.setFixedHeight(
+                _clamp_auto_height(_overlay_card_total_height(main_h, button1))
+            )
+        else:
+            btn_y_legacy = main_container.height() - (button1.height() / 3)
+            self.add(button1, start_x, btn_y_legacy)
+            self.add(
+                button2,
+                start_x + button1.width() + button_spacing,
+                btn_y_legacy,
+            )
 
 
 class HorizontalTextCardWithButton(Container):
@@ -187,6 +240,7 @@ class HorizontalTextCardWithButton(Container):
         on_button_click: Optional callback function for button click.
         text_alignment: Text alignment. Defaults to "left".
         text_font_size: Font size for the text. Defaults to theme.fonts.body.size.
+        auto_height: If True, set card height from content.
     """
 
     def __init__(
@@ -202,6 +256,7 @@ class HorizontalTextCardWithButton(Container):
         on_button_click: Optional[Callable] = None,
         text_alignment: str = "left",
         text_font_size: Optional[int] = None,
+        auto_height: bool = False,
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent, width=container_width)
@@ -231,6 +286,8 @@ class HorizontalTextCardWithButton(Container):
         main_container.add(self.text_box, Spacer(width=center_space), button)
 
         self.add(main_container)
+        if auto_height:
+            self.setFixedHeight(_clamp_auto_height(_intrinsic_height(main_container)))
 
 
 class HorizontalTextCard(Container):
@@ -246,6 +303,7 @@ class HorizontalTextCard(Container):
         bottom_margin: Bottom margin. Defaults to 50.
         text_alignment: Text alignment. Defaults to "left".
         text_font_size: Font size for the text. Defaults to theme.fonts.body.size.
+        auto_height: If True, set card height from content.
     """
 
     def __init__(
@@ -258,6 +316,7 @@ class HorizontalTextCard(Container):
         bottom_margin: int = 50,
         text_alignment: str = "left",
         text_font_size: Optional[int] = None,
+        auto_height: bool = False,
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent, width=container_width)
@@ -279,6 +338,8 @@ class HorizontalTextCard(Container):
         main_container.add(self.text_box)
 
         self.add(main_container)
+        if auto_height:
+            self.setFixedHeight(_clamp_auto_height(_intrinsic_height(main_container)))
 
 
 class MediaCard(Container):
@@ -302,6 +363,7 @@ class MediaCard(Container):
         subtitle_font_size: Font size for subtitle. Defaults to theme.fonts.body.size.
         body_alignment: Body text alignment. Defaults to "left".
         body_font_size: Font size for body text. Defaults to theme.fonts.body.size.
+        auto_height: If True, set card height from content.
     """
 
     def __init__(
@@ -322,6 +384,7 @@ class MediaCard(Container):
         subtitle_font_size: Optional[int] = None,
         body_alignment: str = "left",
         body_font_size: Optional[int] = None,
+        auto_height: bool = False,
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent, width=container_width)
@@ -377,6 +440,8 @@ class MediaCard(Container):
             main_container.add(title_box, subtitle_box, body_box)
 
         self.add(main_container)
+        if auto_height:
+            self.setFixedHeight(_clamp_auto_height(_intrinsic_height(main_container)))
 
 
 class MediaCardWithButton(Container):
@@ -402,6 +467,7 @@ class MediaCardWithButton(Container):
         subtitle_font_size: Font size for subtitle. Defaults to theme.fonts.body.size.
         body_alignment: Body text alignment. Defaults to "left".
         body_font_size: Font size for body text. Defaults to theme.fonts.body.size.
+        auto_height: If True, set card height from content.
     """
 
     def __init__(
@@ -424,6 +490,7 @@ class MediaCardWithButton(Container):
         subtitle_font_size: Optional[int] = None,
         body_alignment: str = "left",
         body_font_size: Optional[int] = None,
+        auto_height: bool = False,
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent, width=container_width)
@@ -483,11 +550,20 @@ class MediaCardWithButton(Container):
             button.on_clicked(on_button_click)
 
         self.add(main_container)
-        self.add(
-            button,
-            (container_width / 2) - (button.width() / 2),
-            main_container.height() - (button.height() / 3),
-        )
+        btn_x = (container_width / 2) - (button.width() / 2)
+        if auto_height:
+            main_h = _intrinsic_height(main_container)
+            btn_y = _overlay_button_y(main_h, button)
+            self.add(button, btn_x, btn_y)
+            self.setFixedHeight(
+                _clamp_auto_height(_overlay_card_total_height(main_h, button))
+            )
+        else:
+            self.add(
+                button,
+                btn_x,
+                main_container.height() - (button.height() / 3),
+            )
 
 
 class MediaCardWithTwoButtons(Container):
@@ -498,7 +574,6 @@ class MediaCardWithTwoButtons(Container):
         title_text: Title text. Defaults to placeholder.
         subtitle_text: Subtitle text. Defaults to placeholder.
         body_text: Body text. Defaults to placeholder.
-        button_text_1: Text for the first button. Defaults to "Cancel".
         button_text_1: Text for the first button. Defaults to "Cancel".
         button_text_2: Text for the second button. Defaults to "Confirm".
         image_path: Path to the image. Defaults to empty string.
@@ -517,6 +592,7 @@ class MediaCardWithTwoButtons(Container):
         subtitle_font_size: Font size for subtitle. Defaults to theme.fonts.body.size.
         body_alignment: Body text alignment. Defaults to "left".
         body_font_size: Font size for body text. Defaults to theme.fonts.body.size.
+        auto_height: If True, set card height from content.
     """
 
     def __init__(
@@ -542,6 +618,7 @@ class MediaCardWithTwoButtons(Container):
         subtitle_font_size: Optional[int] = None,
         body_alignment: str = "left",
         body_font_size: Optional[int] = None,
+        auto_height: bool = False,
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent, width=container_width)
@@ -610,12 +687,26 @@ class MediaCardWithTwoButtons(Container):
         start_x = (container_width / 2) - (total_buttons_width / 2)
 
         self.add(main_container)
-        self.add(button1, start_x, main_container.height() - (button1.height() / 3))
-        self.add(
-            button2,
-            start_x + button1.width() + button_spacing,
-            main_container.height() - (button2.height() / 3),
-        )
+        if auto_height:
+            main_h = _intrinsic_height(main_container)
+            btn_y = _overlay_button_y(main_h, button1)
+            self.add(button1, start_x, btn_y)
+            self.add(
+                button2,
+                start_x + button1.width() + button_spacing,
+                btn_y,
+            )
+            self.setFixedHeight(
+                _clamp_auto_height(_overlay_card_total_height(main_h, button1))
+            )
+        else:
+            btn_y_legacy = main_container.height() - (button1.height() / 3)
+            self.add(button1, start_x, btn_y_legacy)
+            self.add(
+                button2,
+                start_x + button1.width() + button_spacing,
+                btn_y_legacy,
+            )
 
 
 class ScrollableListCard(Container):

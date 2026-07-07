@@ -20,9 +20,7 @@ level detection. Supports both sensorlib (on Raven devices) and Qt audio
 
 # Standard library imports
 import io
-import json
 import wave
-from pathlib import Path
 from typing import Optional, Tuple
 
 # Third-party imports
@@ -66,6 +64,7 @@ class Microphone(QObject):
         self.audio_device: Optional[QIODevice] = None
         self.audio_source = None
         self.audio_format = None
+        self._sample_rate: int = 44100
         self.recording: bool = False
         self.read_timer = QTimer()
         self.read_timer.timeout.connect(self._read_audio_data)
@@ -99,6 +98,7 @@ class Microphone(QObject):
 
                 self.audio_source = QAudioSource(device, fmt)
                 self.audio_format = fmt
+                self._sample_rate = fmt.sampleRate()
                 log.info("Audio source initialized successfully.")
             except Exception as e:
                 log.error(f"Failed to set up audio input: {e}", exc_info=True)
@@ -141,6 +141,14 @@ class Microphone(QObject):
             return self.audio_device
         except Exception as e:
             log.error(f"Failed to start recording: {e}", exc_info=True)
+            if self.audio_source is not None:
+                try:
+                    self.audio_source.stop()
+                except Exception:
+                    pass
+            self.recording = False
+            self.audio_device = None
+            return None
 
     def stop_recording(self) -> bytes:
         """Stop audio recording and return WAV formatted audio data."""
@@ -178,6 +186,22 @@ class Microphone(QObject):
         except Exception as e:
             log.error(f"Error while stopping recording: {e}", exc_info=True)
             return b""
+
+    def close(self) -> None:
+        """Stop any active recording and release audio resources."""
+        if self.recording:
+            try:
+                self.stop_recording()
+            except Exception as e:
+                log.error(f"Error stopping recording during close: {e}", exc_info=True)
+        if self.read_timer.isActive():
+            self.read_timer.stop()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
 
     ## Utils
     ## =====
@@ -217,7 +241,7 @@ class Microphone(QObject):
             with wave.open(buffer, "wb") as wf:
                 wf.setnchannels(1)
                 wf.setsampwidth(2)
-                wf.setframerate(44100)
+                wf.setframerate(self._sample_rate)
                 wf.writeframes(raw_data)
             return buffer.getvalue()
         except Exception as e:

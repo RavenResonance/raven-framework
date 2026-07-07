@@ -39,7 +39,7 @@ _config = load_config()
 # Simulator constants
 SIMULATOR_ACCEL_SCALE = _config["peripherals"]["SIMULATOR_ACCEL_SCALE"]
 
-# Global key state tracker for simulator mode
+# Global arrow-key state for simulator mode
 _key_states = {
     Qt.Key.Key_Up: False,
     Qt.Key.Key_Down: False,
@@ -47,15 +47,15 @@ _key_states = {
     Qt.Key.Key_Right: False,
 }
 
-# Track if event filter is already installed
+# Whether the event filter is already installed
 _event_filter_installed = False
 
 
-class IMUKeyTracker(QObject):
-    """Event filter to track arrow key presses for IMU simulation."""
+class IMUKeyMonitor(QObject):
+    """Event filter to observe arrow key presses for IMU simulation."""
 
     def eventFilter(self, obj, event) -> bool:
-        """Filter key events to track arrow key states."""
+        """Filter key events to update arrow key states."""
         if isinstance(event, QKeyEvent):
             key = event.key()
             if key in _key_states:
@@ -74,10 +74,10 @@ class IMU:
         self.sensorlib_client = initialize_sensorlib_client(
             app_id, app_key, SensorType.IMU
         )
-        self.key_tracker: Optional[IMUKeyTracker] = None
+        self.key_monitor: Optional[IMUKeyMonitor] = None
         if not self.sensorlib_client:
             log.info("IMU: Using simulator mode (arrow keys for simulation)")
-            self._setup_key_tracking()
+            self._setup_key_monitoring()
 
     def get_reading(self) -> Optional[dict]:
         """Get IMU reading with accelerometer, gyroscope, and magnetometer data."""
@@ -92,23 +92,25 @@ class IMU:
         else:
             return self._get_simulated_reading()
 
-    def _setup_key_tracking(self) -> None:
-        """Set up key tracking for simulator mode."""
+    def _setup_key_monitoring(self) -> None:
+        """Set up arrow-key monitoring for simulator mode."""
         global _event_filter_installed
 
         try:
             app = QApplication.instance()
             if app is None:
-                log.warning("IMU: No QApplication instance available for key tracking")
+                log.warning(
+                    "IMU: No QApplication instance available for key monitoring"
+                )
                 return
 
             if not _event_filter_installed:
-                self.key_tracker = IMUKeyTracker()
-                app.installEventFilter(self.key_tracker)
+                self.key_monitor = IMUKeyMonitor()
+                app.installEventFilter(self.key_monitor)
                 _event_filter_installed = True
-                log.info("IMU: Key tracking enabled for arrow keys")
+                log.info("IMU: Arrow key monitoring enabled for simulation")
         except Exception as e:
-            log.error(f"Error setting up key tracking: {e}", exc_info=True)
+            log.error(f"Error setting up key monitoring: {e}", exc_info=True)
 
     def _get_simulated_reading(self) -> Optional[dict]:
         """Get simulated IMU reading based on arrow key presses."""

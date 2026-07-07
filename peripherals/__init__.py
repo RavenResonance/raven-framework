@@ -13,12 +13,12 @@
 """
 Hardware peripherals and sensors for the Raven Framework.
 Import from here for a cleaner API, e.g.:
-  from raven_framework.peripherals import Camera, Microphone, Speaker, EyeTracker, IMU, ClickButton
+  from raven_framework.peripherals import Camera, Microphone, Speaker, EyeControl, IMU, ClickButton
 """
 
 from .camera import Camera
 from .click_button import ClickButton
-from .eye_tracker import EyeTracker
+from .eye_control import EyeControl
 from .imu import IMU
 from .microphone import Microphone
 from .sensor_utils import SensorType, initialize_sensorlib_client
@@ -27,7 +27,7 @@ from .speaker import Speaker
 __all__ = [
     "Camera",
     "ClickButton",
-    "EyeTracker",
+    "EyeControl",
     "IMU",
     "Microphone",
     "SensorType",

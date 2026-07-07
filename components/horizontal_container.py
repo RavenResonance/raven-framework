@@ -329,6 +329,7 @@ class HorizontalContainer(QWidget):
                 if item and item.widget():
                     widget = item.widget()
                     if widget is not self._background:
+                        widget.close()
                         widget.setParent(None)
                         widget.deleteLater()
                         log.debug(f"Removed widget from HorizontalContainer: {widget}")

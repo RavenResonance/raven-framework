@@ -11,7 +11,7 @@ Raven Framework is a comprehensive UI framework and API for building gaze-based 
 - Modern UI components built on Python
 - Media handling and AI integration
 
-We are Raven Resonance, a team of engineers and designers who have built and used wearable computers for years. [Raven Prism 1] will be out soon and runs RavenOS, a Linux-based operating system designed for all-day wear. This repo contains a preview of Raven Framework and is the first part of the Raven SDK. We would love to hear your feedback in our [Discord community](https://raven.computer/s/discord)!
+We are Raven Resonance, a team of engineers and designers who have built and used wearable computers for years. [Raven Prism 1](https://raven.computer) will be out soon and runs RavenOS, a Linux-based operating system designed for all-day wear. This repo contains a preview of Raven Framework and is the first part of the Raven SDK. We would love to hear your feedback in our [Discord community](https://raven.computer/s/discord)!
 
 **Repository:** https://github.com/RavenResonance/raven-framework  
 **Starter Projects:** https://github.com/RavenResonance/raven-starter-project
@@ -392,7 +392,7 @@ Reusable card components with various layouts.
 #### TextCardWithButton
 
 ```python
-from raven_framework.cards import TextCardWithButton
+from raven_framework.components.cards import TextCardWithButton
 
 card = TextCardWithButton(
     text="Card text",
@@ -405,7 +405,7 @@ card = TextCardWithButton(
 #### TextCardWithTwoButtons
 
 ```python
-from raven_framework.cards import TextCardWithTwoButtons
+from raven_framework.components.cards import TextCardWithTwoButtons
 
 card = TextCardWithTwoButtons(
     text="Card text",
@@ -420,7 +420,7 @@ card = TextCardWithTwoButtons(
 #### HorizontalTextCardWithButton
 
 ```python
-from raven_framework.cards import HorizontalTextCardWithButton
+from raven_framework.components.cards import HorizontalTextCardWithButton
 
 card = HorizontalTextCardWithButton(
     text="Card text",
@@ -433,7 +433,7 @@ card = HorizontalTextCardWithButton(
 #### HorizontalTextCard
 
 ```python
-from raven_framework.cards import HorizontalTextCard
+from raven_framework.components.cards import HorizontalTextCard
 
 card = HorizontalTextCard(
     text="Card text",
@@ -445,7 +445,7 @@ card = HorizontalTextCard(
 #### MediaCard
 
 ```python
-from raven_framework.cards import MediaCard
+from raven_framework.components.cards import MediaCard
 
 card = MediaCard(
     image_path="assets/image.png",
@@ -460,7 +460,7 @@ card = MediaCard(
 #### MediaCardWithButton
 
 ```python
-from raven_framework.cards import MediaCardWithButton
+from raven_framework.components.cards import MediaCardWithButton
 
 card = MediaCardWithButton(
     image_path="assets/image.png",
@@ -477,7 +477,7 @@ card = MediaCardWithButton(
 #### MediaCardWithTwoButtons
 
 ```python
-from raven_framework.cards import MediaCardWithTwoButtons
+from raven_framework.components.cards import MediaCardWithTwoButtons
 
 card = MediaCardWithTwoButtons(
     image_path="assets/image.png",
@@ -496,7 +496,7 @@ card = MediaCardWithTwoButtons(
 #### ScrollableListCard
 
 ```python
-from raven_framework.cards import ScrollableListCard
+from raven_framework.components.cards import ScrollableListCard
 
 card = ScrollableListCard(
     title_text="List Title",
@@ -1446,7 +1446,7 @@ from raven_framework.helpers.async_runner import AsyncRunner
 from raven_framework.helpers.animation_utils import fade_in
 
 # Raven Framework cards
-from raven_framework.cards import TextCardWithButton
+from raven_framework.components.cards import TextCardWithButton
 
 # Raven Framework sensors (heavier imports)
 from raven_framework.peripherals.camera import Camera

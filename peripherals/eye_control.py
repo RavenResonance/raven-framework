@@ -11,10 +11,10 @@
 # ================================================================
 
 """
-Eye tracker sensor for Raven Framework.
+Eye control sensor for Raven Framework.
 
-This module provides eye tracking functionality for reading gaze position
-coordinates. Only available on Raven devices via sensorlib.
+This module provides gaze position input for reading gaze coordinates.
+Only available on Raven devices via sensorlib.
 """
 
 # Standard library imports
@@ -29,23 +29,23 @@ from ..helpers.logger import get_logger
 from ..helpers.utils_light import load_config
 from .sensor_utils import SensorType, initialize_sensorlib_client
 
-log = get_logger("EyeTracker")
+log = get_logger("EyeControl")
 
 # Load configuration
 _config = load_config()
 DISPLAY_RESOLUTION = tuple(_config["resolution"]["DISPLAY_RESOLUTION"])
 
 
-class EyeTracker:
-    """Eye tracker class for reading gaze position."""
+class EyeControl:
+    """Eye control interface for reading gaze position."""
 
     def __init__(self, app_id: str = "", app_key: str = "") -> None:
-        """Initialize eye tracker with optional app_id and app_key for entitlement verification."""
+        """Initialize eye control with optional app_id and app_key for entitlement verification."""
         self.sensorlib_client = initialize_sensorlib_client(
-            app_id, app_key, SensorType.EYE_TRACKER
+            app_id, app_key, SensorType.EYE_CONTROL
         )
         if not self.sensorlib_client:
-            log.info("EyeTracker: Using simulator mode (not available)")
+            log.info("EyeControl: Using simulator mode (not available)")
 
     def get_gaze_position(self) -> Optional[Tuple[int, int]]:
         """Get current gaze position as (x, y) coordinates."""
@@ -62,7 +62,7 @@ class EyeTracker:
                 app = QApplication.instance()
                 if app is None:
                     log.warning(
-                        "EyeTracker: QApplication not available, returning None"
+                        "EyeControl: QApplication not available, returning None"
                     )
                     return None
 

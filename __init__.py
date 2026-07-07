@@ -15,7 +15,7 @@ Raven Framework - A comprehensive UI framework and API for
 building applications for Raven with PySide6.
 
 This module provides a complete set of UI components, utilities, and tools for creating
-interactive applications with support for gaze tracking, voice input, and modern UI patterns.
+interactive applications with support for gaze-based input, voice input, and modern UI patterns.
 
 
 """
@@ -36,7 +36,13 @@ from .core.run_app import RunApp
 from .helpers import themes
 
 # Essential UI components (always loaded - lightweight)
-from .helpers.animation_utils import fade_in, fade_out
+from .helpers.animation_utils import (
+    RavenCurve,
+    fade_in,
+    fade_out,
+    make_property_animation,
+    resolve_curve,
+)
 from .helpers.async_runner import AsyncRunner
 from .helpers.logger import *
 from .helpers.routine import Routine
@@ -65,7 +71,7 @@ def __getattr__(name: str) -> Any:
         - Heavy utilities: convert_ndarray_to_pixmap_image, convert_ndarray_to_base64_image,
           get_frame_from_video, base64_to_image, image_to_base64
         - Heavy UI components: WebViewer, OpenAiHelper, MediaViewer, ModelViewer
-        - Peripherals: Camera, Microphone, Speaker, IMU, EyeTracker, ClickButton
+        - Peripherals: Camera, Microphone, Speaker, IMU, EyeControl, ClickButton, HandGestureDetector
     """
     # Heavy utilities (OpenCV/NumPy functions only)
     heavy_utils = [
@@ -116,14 +122,22 @@ def __getattr__(name: str) -> Any:
         from .peripherals.imu import IMU
 
         return IMU
-    elif name == "EyeTracker":
-        from .peripherals.eye_tracker import EyeTracker
+    elif name == "EyeControl":
+        from .peripherals.eye_control import EyeControl
 
-        return EyeTracker
+        return EyeControl
+    elif name == "HandGestureDetector":
+        from .helpers.hand_gesture import HandGestureDetector
+
+        return HandGestureDetector
     elif name == "ClickButton":
         from .peripherals.click_button import ClickButton
 
         return ClickButton
+    elif name == "StorageManager":
+        from .storage import StorageManager
+
+        return StorageManager
 
     raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
 
@@ -131,8 +145,11 @@ def __getattr__(name: str) -> Any:
 __all__ = [
     # Core UI components (always loaded)
     "AsyncRunner",
+    "RavenCurve",
     "fade_in",
     "fade_out",
+    "make_property_animation",
+    "resolve_curve",
     "Button",
     "Container",
     "ExpandingIcon",
@@ -147,7 +164,8 @@ __all__ = [
     "VerticalContainer",
     # Lazy loaded components
     "Camera",
-    "EyeTracker",
+    "EyeControl",
+    "HandGestureDetector",
     "IMU",
     "MediaViewer",
     "Microphone",
@@ -155,6 +173,7 @@ __all__ = [
     "OpenAiHelper",
     "ClickButton",
     "Speaker",
+    "StorageManager",
     "WebViewer",
     "convert_ndarray_to_pixmap_image",
     "convert_ndarray_to_base64_image",

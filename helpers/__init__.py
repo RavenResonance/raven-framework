@@ -35,6 +35,7 @@ from .themes import (
 )
 from .utils_light import (
     css_color,
+    get_gaze_marker_mode,
     hex_to_qcolor,
     is_raven_device,
     load_config,
@@ -99,6 +100,7 @@ __all__ = [
     "load_config",
     "pascal_to_snake",
     "qcolor_to_hex",
+    "get_gaze_marker_mode",
     "set_custom_circle_cursor",
     "snake_to_pascal_case",
     "snake_to_spaced_pascal",

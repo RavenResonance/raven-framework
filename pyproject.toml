@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "raven_framework"
-version = "1.0.2"
+version = "1.0.3"
 description = "A comprehensive UI framework for building Raven applications with PySide6"
 readme = "README.md"
 license = {text = "Proprietary - Copyright (c) 2026 Raven Resonance, Inc. All Rights Reserved."}
@@ -24,8 +24,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-qt>=4.4",
+]
 audio-simulator = [
     "simpleaudio==1.0.4",
+]
+hand-gesture = [
+    "cvzone>=1.6.1",
 ]
 recommended = [
     "PySide6>=6.6.0,<7.0.0",
@@ -39,13 +46,31 @@ recommended = [
 ]
 
 [tool.setuptools]
-packages = ["raven_framework"]
+packages = [
+    "raven_framework",
+    "raven_framework.components",
+    "raven_framework.core",
+    "raven_framework.helpers",
+    "raven_framework.ipc",
+    "raven_framework.peripherals",
+    "raven_framework.storage",
+]
 package-dir = {"raven_framework" = "."}
 
 [tool.setuptools.package-data]
 raven_framework = [
+    "config.json",
     "assets/**/*",
     "fonts/**/*",
+    "core/*.npz",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+addopts = ["--import-mode=importlib", "--ignore=__init__.py"]
+filterwarnings = [
+    "ignore::DeprecationWarning",
 ]
 
 [tool.black]

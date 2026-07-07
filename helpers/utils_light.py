@@ -18,6 +18,7 @@ that don't require heavy dependencies like OpenCV or NumPy.
 """
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -31,7 +32,6 @@ from .logger import get_logger
 log = get_logger("UtilsLight")
 
 HEX_COLOR_REGEX = re.compile(r"^#?([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})$")
-RAVEN_DEVICE_MARKER_PATH = Path("/data/raven/.is_raven_device")
 
 
 def load_config() -> dict:
@@ -44,6 +44,16 @@ def load_config() -> dict:
     config_path = Path(__file__).parent.parent / "config.json"
     with open(config_path, "r") as f:
         return json.load(f)
+
+
+# Marker file that signals we are running on a real Raven device.
+# Stored in /data (persistent across reboots) rather than /run (tmpfs).
+# Written once by manager.py at startup and by deploy.sh on each deploy.
+_ipc_config = load_config().get("ipc", {})
+_ravend_socket_dir = _ipc_config.get("RAVEND_SOCKET_DIR", "/run/ravend")
+RAVEN_DEVICE_MARKER_PATH = Path(
+    _ipc_config.get("RAVEN_DEVICE_MARKER_PATH", "/data/raven/.is_raven_device")
+)
 
 
 def hex_to_qcolor(hex_code: str) -> QColor:
@@ -234,25 +244,38 @@ def to_qcolor(color: Any) -> QColor:
         return QColor(255, 255, 255)
 
 
-def set_custom_circle_cursor(
+_GAZE_MARKER_MODES = frozenset({"circle", "hidden"})
+
+
+def get_gaze_marker_mode() -> str:
+    """
+    Return the configured gaze marker cursor mode.
+
+    Reads ``display.GAZE_MARKER_MODE`` from config (``"circle"`` or ``"hidden"``).
+    Falls back to legacy ``display.ENABLE_GAZE_MARKER`` boolean when the mode key
+    is absent.
+
+    Returns:
+        str: ``"circle"`` or ``"hidden"``.
+    """
+    display = load_config().get("display", {})
+    mode = display.get("GAZE_MARKER_MODE")
+    if mode in _GAZE_MARKER_MODES:
+        return mode
+    if mode is not None:
+        log.warning(
+            f"Invalid GAZE_MARKER_MODE '{mode}', expected 'circle' or 'hidden'. "
+            "Using 'hidden'."
+        )
+        return "hidden"
+    if display.get("ENABLE_GAZE_MARKER", True):
+        return "circle"
+    return "hidden"
+
+
+def _draw_circle_cursor(
     self_widget: QWidget, size: int = 32, circle_radius: int = 12, pen_width: int = 2
 ) -> None:
-    """
-    Set a custom circular cursor for the specified widget.
-
-    Creates a white circular cursor with a transparent background and applies it
-    to the widget. The cursor is centered at the hotspot.
-
-    Args:
-        self_widget (QWidget): Widget to set the custom cursor for. Must not be None.
-        size (int): Size of the cursor pixmap in pixels. Defaults to 32.
-        circle_radius (int): Radius of the circular cursor in pixels. Defaults to 12.
-        pen_width (int): Width of the cursor pen in pixels. Defaults to 2.
-
-    Raises:
-        ValueError: If self_widget is None, or if size, circle_radius, or pen_width are not positive.
-    """
-
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.transparent)
     painter = QPainter(pixmap)
@@ -264,19 +287,57 @@ def set_custom_circle_cursor(
     top_left = (size - circle_radius) // 2
     painter.drawEllipse(top_left, top_left, circle_radius, circle_radius)
     painter.end()
-    cursor = QCursor(pixmap, size // 2, size // 2)
-    self_widget.setCursor(cursor)
+    self_widget.setCursor(QCursor(pixmap, size // 2, size // 2))
+
+
+def set_custom_circle_cursor(self_widget: QWidget, mode: str | None = None) -> None:
+    """
+    Apply the gaze marker cursor for the specified widget.
+
+    Uses ``display.GAZE_MARKER_MODE`` from config when *mode* is not provided
+    (``"circle"`` for a white ring, ``"hidden"`` to hide the cursor).
+
+    Args:
+        self_widget (QWidget): Widget to update the cursor for.
+        mode (str | None): ``"circle"``, ``"hidden"``, or None to read from config.
+    """
+    if mode is None:
+        mode = get_gaze_marker_mode()
+    if mode == "circle":
+        _draw_circle_cursor(self_widget)
+    elif mode == "hidden":
+        self_widget.setCursor(Qt.CursorShape.BlankCursor)
+    else:
+        log.warning(
+            f"Invalid gaze marker mode '{mode}', expected 'circle' or 'hidden'. "
+            "Using 'hidden'."
+        )
+        self_widget.setCursor(Qt.CursorShape.BlankCursor)
 
 
 def is_raven_device() -> bool:
     """
-    Check if running on a Raven device by checking for marker file.
+    Return True iff running on a real Raven device (hardware marker file).
 
-    Returns:
-        bool: True if running on a Raven device, False otherwise.
+    The marker lives at RAVEN_DEVICE_MARKER_PATH (default
+    /data/raven/.is_raven_device), written by deploy.sh on each deploy.
     """
     try:
         return RAVEN_DEVICE_MARKER_PATH.exists()
-    except Exception as e:
-        log.info(f"Raven device marker file not found. Not a Raven device.")
+    except Exception:
+        return False
+
+
+def uses_ravend_ipc() -> bool:
+    """
+    Return True when code should route peripherals through ravend Unix sockets.
+
+    True if the hardware marker file exists OR RAVEN_DEVICE=1 (set in the
+    dev-app Docker container, which cannot read /data/raven/.is_raven_device).
+    """
+    try:
+        if os.environ.get("RAVEN_DEVICE") == "1":
+            return True
+        return RAVEN_DEVICE_MARKER_PATH.exists()
+    except Exception:
         return False

@@ -19,8 +19,6 @@ Supports QR code detection and gaze annotation.
 """
 
 # Standard library imports
-import json
-from pathlib import Path
 from typing import Optional, Tuple
 
 # Third-party imports
@@ -49,22 +47,38 @@ class Camera:
     def __init__(self, app_id: str = "", app_key: str = "") -> None:
         """Initialize camera with optional app_id and app_key for entitlement verification."""
         self.cap: Optional[cv2.VideoCapture] = None
+        self._sensorlib_open: bool = False
         self.sensorlib_client = initialize_sensorlib_client(
             app_id, app_key, SensorType.CAMERA
         )
         if not self.sensorlib_client:
             log.info("Camera: Using simulator mode (OpenCV)")
 
+    def is_camera_open(self) -> bool:
+        """Return True if the camera is currently open (sensorlib or simulator)."""
+        if self.sensorlib_client:
+            return self._sensorlib_open
+        return self.cap is not None
+
     def open_camera(self) -> Optional[cv2.VideoCapture]:
-        """Open camera and return VideoCapture object or None."""
+        """
+        Open camera. Returns a VideoCapture object in simulator mode.
+
+        On a Raven device (sensorlib) there is no VideoCapture object to return,
+        so this always returns None — check `is_camera_open()` for success/failure
+        instead of relying on the return value.
+        """
         if self.sensorlib_client:
             try:
                 success = self.sensorlib_client.start_camera()
+                self._sensorlib_open = success
                 if success:
                     log.info("Camera opened (sensorlib)")
-                    return None
+                else:
+                    log.error("Failed to open camera via sensorlib")
                 return None
             except Exception as e:
+                self._sensorlib_open = False
                 log.error(f"Error opening camera via sensorlib: {e}", exc_info=True)
                 return None
         else:
@@ -88,6 +102,8 @@ class Camera:
                 self.sensorlib_client.stop_camera()
             except Exception as e:
                 log.error(f"Error closing camera via sensorlib: {e}", exc_info=True)
+            finally:
+                self._sensorlib_open = False
         else:
             if self.cap:
                 self.cap.release()
@@ -124,10 +140,12 @@ class Camera:
         frame = self.capture_camera_image()
         if frame is None:
             return None
-        qr_detector = cv2.QRCodeDetector()
-        data, _, _ = qr_detector.detectAndDecode(frame)
-        if data:
+        try:
+            qr_detector = cv2.QRCodeDetector()
+            data, _, _ = qr_detector.detectAndDecode(frame)
+        finally:
             self.close_camera()
+        if data:
             return frame, data
         return None
 
