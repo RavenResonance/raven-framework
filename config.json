@@ -5,9 +5,7 @@
   },
   "fps": {
     "UI_FPS": 30,
-    "SIMULATOR_FPS": 20,
-    "CAST_FPS_RAVEN_DEVICE": 7,
-    "CAST_FPS_NON_RAVEN_DEVICE": 12
+    "SIMULATOR_FPS": 20
   },
   "deployment": {
     "DEPLOY_ENDPOINT_URL": "https://api.s.raven.computer/developer/deploy/app/",
@@ -52,8 +50,7 @@
     "OVERLAY_BACKGROUND_VIDEO_NIGHT_PATH": "assets/overlay_background_videos/night.mp4",
     "OVERLAY_BACKGROUND_VIDEO_OUTDOORS_PATH": "assets/overlay_background_videos/outdoor.mp4",
     "RAW_MODE_TOOLTIP_TEXT": "The raw app that will render on Raven Prism. Use other modes for previewing how it will blend with background, note that performance other modes is relatively less due to real time blending.",
-    "PRINT_SIMULATOR_PERFORMANCE": false,
-    "PRINT_CAST_PERFORMANCE": false
+    "PRINT_SIMULATOR_PERFORMANCE": false
   },
   "logger": {
     "LOG_NAME": "raven_log",
