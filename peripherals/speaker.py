@@ -14,7 +14,8 @@
 Speaker sensor for Raven Framework.
 
 This module provides speaker functionality for asynchronous playback of WAV audio.
-Supports both sensorlib (on Raven devices) and simpleaudio (in simulator mode).
+Supports sensorlib (on Raven devices) and, in simulator mode, simpleaudio or
+the Windows-only winsound standard-library fallback.
 """
 
 # Standard library imports
@@ -32,6 +33,21 @@ try:
 except ImportError:
     SIMPLEAUDIO_AVAILABLE = False
     sa = None
+
+# winsound is a Windows-only standard-library fallback for simulator playback.
+# It lets audio work on Windows without simpleaudio, which needs a C++ compiler
+# to build and often fails to install there.
+try:
+    import winsound
+
+    WINSOUND_AVAILABLE = True
+except ImportError:
+    WINSOUND_AVAILABLE = False
+    winsound = None
+
+# True when any simulator-mode audio backend is usable (device mode uses
+# sensorlib instead and doesn't depend on either of these).
+SIMULATOR_AUDIO_AVAILABLE = SIMPLEAUDIO_AVAILABLE or WINSOUND_AVAILABLE
 
 from PySide6.QtCore import QObject, Signal
 
@@ -68,6 +84,9 @@ class Speaker:
     def __init__(self, app_id: str = "", app_key: str = "") -> None:
         """Initialize speaker with optional app_id and app_key for entitlement verification."""
         self._play_obj = None
+        # Tracks whether a winsound clip is currently playing, so stop_audio
+        # only purges when there is something to stop (winsound has no handle).
+        self._winsound_playing = False
         self._callback: Optional[Callable[[], None]] = None
         # Keeps each playback's signal emitter alive until its queued
         # cross-thread `finished` signal is actually delivered. Without this,
@@ -86,10 +105,16 @@ class Speaker:
                     "Speaker: Using simulator mode (simpleaudio)",
                     extra={"console": True},
                 )
+            elif WINSOUND_AVAILABLE:
+                log.info(
+                    "Speaker: Using simulator mode (winsound - Windows fallback)",
+                    extra={"console": True},
+                )
             else:
                 log.warning(
-                    "Speaker: simpleaudio not available. Audio playback will not work in simulator mode. "
-                    "Install with: pip install -e .[audio-simulator]",
+                    "Speaker: no simulator audio backend available. Audio playback will not "
+                    "work in simulator mode. Install with: pip install -e .[audio-simulator] "
+                    "(on Windows the built-in winsound fallback is used automatically).",
                     extra={"console": True},
                 )
 
@@ -150,25 +175,22 @@ class Speaker:
             thread.start()
             log.info("Started audio playback thread (Raven device).")
         else:
-            # Check if simpleaudio is available
-            if not SIMPLEAUDIO_AVAILABLE:
+            # Simulator mode: no sensorlib. Pick an available audio backend,
+            # preferring simpleaudio and falling back to winsound on Windows.
+            if not SIMULATOR_AUDIO_AVAILABLE:
                 log.warning(
-                    "Cannot play audio: simpleaudio is not available. "
+                    "Cannot play audio: no simulator audio backend available. "
                     "Install with: pip install -e .[audio-simulator] or use a Raven device.",
                     extra={"console": True},
                 )
                 emitter.finished.emit()
                 return
 
+            backend = self._play_simpleaudio if SIMPLEAUDIO_AVAILABLE else self._play_winsound
+
             def _play() -> None:
                 try:
-                    wave_obj = sa.WaveObject.from_wave_read(
-                        wave.open(io.BytesIO(wav_bytes), "rb")
-                    )
-                    self._play_obj = wave_obj.play()
-                    log.info("Audio playing")
-                    self._play_obj.wait_done()
-                    log.info("Audio playback finished.")
+                    backend(wav_bytes)
                 except Exception as e:
                     log.error(f"Error during audio playback: {e}", exc_info=True)
                 finally:
@@ -177,6 +199,30 @@ class Speaker:
             thread = threading.Thread(target=_play, daemon=True)
             thread.start()
             log.info("Started audio playback thread.")
+
+    def _play_simpleaudio(self, wav_bytes: bytes) -> None:
+        """Blocking playback via simpleaudio; returns when the clip finishes."""
+        wave_obj = sa.WaveObject.from_wave_read(wave.open(io.BytesIO(wav_bytes), "rb"))
+        self._play_obj = wave_obj.play()
+        log.info("Audio playing")
+        self._play_obj.wait_done()
+        log.info("Audio playback finished.")
+
+    def _play_winsound(self, wav_bytes: bytes) -> None:
+        """Blocking playback via the Windows-only winsound fallback.
+
+        Without SND_ASYNC, PlaySound blocks until playback finishes, so this
+        runs on the playback thread and returns when the clip is done (matching
+        simpleaudio's wait_done). SND_MEMORY plays the WAV image directly from
+        bytes; SND_NODEFAULT suppresses the system "ding" if the data is bad.
+        """
+        self._winsound_playing = True
+        try:
+            log.info("Audio playing")
+            winsound.PlaySound(wav_bytes, winsound.SND_MEMORY | winsound.SND_NODEFAULT)
+            log.info("Audio playback finished.")
+        finally:
+            self._winsound_playing = False
 
     def stop_audio(self) -> None:
         """Stop currently playing audio if any."""
@@ -190,16 +236,25 @@ class Speaker:
             except Exception as e:
                 log.error(f"Error stopping audio via sensorlib: {e}", exc_info=True)
         else:
-            if not SIMPLEAUDIO_AVAILABLE:
+            if not SIMULATOR_AUDIO_AVAILABLE:
                 log.warning(
-                    "Cannot stop audio: simpleaudio is not available",
+                    "Cannot stop audio: no simulator audio backend available",
                     extra={"console": True},
                 )
                 return
 
-            if self._play_obj and self._play_obj.is_playing():
+            if SIMPLEAUDIO_AVAILABLE:
+                if self._play_obj and self._play_obj.is_playing():
+                    try:
+                        self._play_obj.stop()
+                        log.info("Audio stopped.")
+                    except Exception as e:
+                        log.error(f"Error stopping audio: {e}", exc_info=True)
+            elif WINSOUND_AVAILABLE and self._winsound_playing:
                 try:
-                    self._play_obj.stop()
+                    # PlaySound(None, SND_PURGE) stops the in-progress SND_MEMORY
+                    # clip, which unblocks the playback thread's PlaySound call.
+                    winsound.PlaySound(None, winsound.SND_PURGE)
                     log.info("Audio stopped.")
                 except Exception as e:
                     log.error(f"Error stopping audio: {e}", exc_info=True)
