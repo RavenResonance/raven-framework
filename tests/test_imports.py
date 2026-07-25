@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import importlib
+import subprocess
+import sys
 
 import pytest
 
@@ -72,3 +74,41 @@ def test_ipc_unknown_attribute_raises() -> None:
 
     with pytest.raises(AttributeError):
         getattr(sm, "NotAnExport")
+
+
+def test_import_raven_framework_is_qt_free() -> None:
+    """Importing raven_framework (and its light helpers) must NOT pull in Qt.
+
+    Non-UI consumers (manager, subprocess_manager, admin_client) rely on this
+    to stay small; an eager Qt import in utils_light/__init__ would silently
+    regress it. Runs in a clean subprocess because the test harness itself
+    already imports PySide6, which would pollute this process's sys.modules.
+    """
+    code = (
+        "import sys, raven_framework;"
+        "from raven_framework import get_logger, is_raven_device;"
+        "from raven_framework.helpers.utils_light import load_config;"
+        "bad=[m for m in ('PySide6.QtWidgets','PySide6.QtGui','PySide6.QtCore')"
+        " if m in sys.modules];"
+        "sys.exit('QT LOADED: %s' % bad if bad else 0)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stdout or result.stderr
+
+
+def test_raven_framework_ui_still_resolves() -> None:
+    """The Qt-backed exports must still load lazily on access."""
+    import raven_framework
+
+    for name in (
+        "RunApp",
+        "RavenApp",
+        "Container",
+        "TextBox",
+        "Routine",
+        "AsyncRunner",
+        "fade_in",
+    ):
+        assert getattr(raven_framework, name) is not None

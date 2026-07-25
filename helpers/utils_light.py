@@ -17,15 +17,17 @@ This module provides color conversion utilities and string transformation functi
 that don't require heavy dependencies like OpenCV or NumPy.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QCursor, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import QWidget
+if TYPE_CHECKING:  # type-only; no Qt import at module load
+    from PySide6.QtGui import QColor
+    from PySide6.QtWidgets import QWidget
 
 from .logger import get_logger
 
@@ -69,6 +71,8 @@ def hex_to_qcolor(hex_code: str) -> QColor:
     Returns:
         QColor: QColor object representing the hex color, or white on error.
     """
+    from PySide6.QtGui import QColor
+
     if not isinstance(hex_code, str):
         log.error(f"hex_to_qcolor: Expected string, got {type(hex_code)}")
         return QColor(255, 255, 255)
@@ -113,6 +117,8 @@ def qcolor_to_hex(qcolor: QColor) -> str:
     Returns:
         str: Hex color string in format "#RRGGBB", or "#FFFFFF" on error.
     """
+    from PySide6.QtGui import QColor
+
     if not isinstance(qcolor, QColor):
         log.error(f"qcolor_to_hex: Expected QColor, got {type(qcolor)}")
         return "#FFFFFF"
@@ -188,6 +194,8 @@ def css_color(color: Any) -> str:
     Returns:
         str: CSS-compatible hex color string (e.g., "#FFFFFF").
     """
+    from PySide6.QtGui import QColor
+
     if isinstance(color, QColor):
         return qcolor_to_hex(color)
     elif isinstance(color, str):
@@ -225,6 +233,8 @@ def to_qcolor(color: Any) -> QColor:
     Returns:
         QColor: QColor object representing the color, or white on error.
     """
+    from PySide6.QtGui import QColor
+
     if isinstance(color, QColor):
         return color
     elif isinstance(color, str):
@@ -276,6 +286,9 @@ def get_gaze_marker_mode() -> str:
 def _draw_circle_cursor(
     self_widget: QWidget, size: int = 32, circle_radius: int = 12, pen_width: int = 2
 ) -> None:
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QColor, QCursor, QPainter, QPen, QPixmap
+
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.transparent)
     painter = QPainter(pixmap)
@@ -301,6 +314,8 @@ def set_custom_circle_cursor(self_widget: QWidget, mode: str | None = None) -> N
         self_widget (QWidget): Widget to update the cursor for.
         mode (str | None): ``"circle"``, ``"hidden"``, or None to read from config.
     """
+    from PySide6.QtCore import Qt
+
     if mode is None:
         mode = get_gaze_marker_mode()
     if mode == "circle":

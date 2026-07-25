@@ -871,6 +871,32 @@ class SimulatorRunApp(QMainWindow):
             return None
         return result
 
+    def start_hidden(self) -> None:
+        """Make the visible surface transparent until revealed (handoff)."""
+        surface = (
+            self._app_widget
+            if getattr(self, "_raw_mode", False)
+            else getattr(self, "_composite_label", None)
+        )
+        if surface is not None:
+            effect = QGraphicsOpacityEffect(surface)
+            effect.setOpacity(0.0)
+            surface.setGraphicsEffect(effect)
+
+    def reveal(self, duration_ms: int) -> None:
+        """Fade the visible surface in (handoff cross-fade with the launcher)."""
+        if getattr(self, "_raw_mode", False):
+            fade_in(self._app_widget, duration=duration_ms)
+        elif hasattr(self, "_composite_label"):
+            fade_in(self._composite_label, duration=duration_ms)
+
+    def conceal(self, duration_ms: int) -> None:
+        """Fade the visible surface out (mirror of reveal, for app exit)."""
+        if getattr(self, "_raw_mode", False):
+            fade_out(self._app_widget, duration=duration_ms)
+        elif hasattr(self, "_composite_label"):
+            fade_out(self._composite_label, duration=duration_ms)
+
     def sleep_app_ui(self, duration_ms: int, curve: str) -> None:
         """Fade the visible simulator UI out (composite label or raw app widget)."""
         self._app_ui_asleep = True

@@ -57,6 +57,8 @@ APP_CONTAINER_HEIGHT = APP_RESOLUTION[1]
 TIME_UPDATE_INTERVAL_MS = 1000  # milliseconds
 ENABLE_TIME_DISPLAY = False
 
+APP_EXIT_FADE_MS = _config["animation"]["app_launch"]["APP_EXIT_FADE_MS"]
+
 _wake_cfg = _config["animation"]["wake"]
 
 
@@ -188,16 +190,19 @@ class RavenApp(Container):
         self.close_icon.set_disabled(False)
 
     def _fade_ui_for_sleep_wake(self, *, sleeping: bool) -> None:
-        """Fade the visible UI; simulator composites on a label, not the live widget."""
-        from .raven_simulator import SimulatorRunApp
+        """Fade the visible UI; simulator composites on a label, not the live
+        widget. On device the window is always ``RunApp``, so skip (and never
+        import) the simulator — it's heavy to load."""
+        if not is_raven_device():
+            from .raven_simulator import SimulatorRunApp
 
-        win = self.window()
-        if isinstance(win, SimulatorRunApp):
-            if sleeping:
-                win.sleep_app_ui(self._fade_ms, self._fade_curve)
-            else:
-                win.wake_app_ui(self._fade_ms, self._fade_curve)
-            return
+            win = self.window()
+            if isinstance(win, SimulatorRunApp):
+                if sleeping:
+                    win.sleep_app_ui(self._fade_ms, self._fade_curve)
+                else:
+                    win.wake_app_ui(self._fade_ms, self._fade_curve)
+                return
         if sleeping:
             fade_out(self, duration=self._fade_ms, curve=self._fade_curve)
         else:
@@ -242,15 +247,37 @@ class RavenApp(Container):
         """
         Handle home button click event.
 
-        Closes the main window gracefully so RunApp.closeEvent can stop
-        timers and worker threads, then quits the application.
+        Fades the app content out (the exit mirror of the launch reveal), then
+        closes the window and quits so RunApp.closeEvent can stop timers and
+        worker threads. The exit signal is sent after the fade, so the launcher
+        fades back in only once the app has faded out.
         """
+        if getattr(self, "_exiting", False):
+            return
+        self._exiting = True
         try:
             log.info(
-                "Close button clicked - shutting down app...", extra={"console": True}
+                "Close button clicked - fading out...", extra={"console": True}
             )
-            log.info("RAVEN APP READY EXITED SIGNAL", extra={"console": True})
+            self._set_ui_interaction_blocked(True)
+            win = self.window()
+            if win is not None and hasattr(win, "conceal"):
+                win.conceal(APP_EXIT_FADE_MS)
+                QTimer.singleShot(APP_EXIT_FADE_MS, self._finalize_exit)
+            else:
+                self._finalize_exit()
+        except Exception as e:
+            log.error(
+                f"Error starting app shutdown: {e}",
+                exc_info=True,
+                extra={"console": True},
+            )
+            self._finalize_exit()
 
+    def _finalize_exit(self) -> None:
+        """After the exit fade: signal the launcher, close the window, quit."""
+        try:
+            log.info("RAVEN APP READY EXITED SIGNAL", extra={"console": True})
             if is_raven_device():
                 try:
                     from ..ipc.app_launch import send_app_exited

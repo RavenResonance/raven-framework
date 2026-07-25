@@ -66,7 +66,7 @@
   },
   "ipc": {
     "APP_LAUNCH_SOCKET_PATH": "/tmp/raven_app_launch.sock",
-    "APP_LAUNCHED_SIGNAL_DELAY_MS": 500,
+    "APP_LAUNCHED_SIGNAL_DELAY_MS": 150,
     "RAVEND_SOCKET_DIR": "/run/ravend",
     "RAVEN_DEVICE_MARKER_PATH": "/data/raven/.is_raven_device"
   },
@@ -92,6 +92,10 @@
       "FADE_CURVE": "IN_OUT_SINE",
       "WAKE_BRIGHTNESS_GAIN": 20,
       "SLEEP_BRIGHTNESS_GAIN": 0
+    },
+    "app_launch": {
+      "APP_HANDOFF_MS": 800,
+      "APP_EXIT_FADE_MS": 1000
     }
   }
 }

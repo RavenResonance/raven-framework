@@ -23,8 +23,15 @@ import traceback
 from typing import Callable, Optional
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QGraphicsOpacityEffect,
+    QMainWindow,
+    QVBoxLayout,
+    QWidget,
+)
 
+from ..helpers.animation_utils import fade_in, fade_out
 from ..helpers.font_utils import preload_fonts
 from ..helpers.logger import get_logger
 from ..helpers.routine import Routine
@@ -44,6 +51,12 @@ _config = load_config()
 DISPLAY_RESOLUTION = tuple(_config["resolution"]["DISPLAY_RESOLUTION"])
 APP_WINDOW_RESOLUTION = (DISPLAY_RESOLUTION[0], DISPLAY_RESOLUTION[1])
 APP_LAUNCHED_SIGNAL_DELAY_MS = _config["ipc"]["APP_LAUNCHED_SIGNAL_DELAY_MS"]
+# Single source of truth for the app-launch hand-off: the launcher fades its
+# loading screen out over this window while the app fades itself in over the
+# same window. One value drives both sides so the cross-fade stays symmetric.
+APP_HANDOFF_MS = _config["animation"]["app_launch"]["APP_HANDOFF_MS"]
+APP_REVEAL_MS = APP_HANDOFF_MS  # app fade-in duration
+APP_LOADING_FADEOUT_MS = APP_HANDOFF_MS  # wait for the launcher's loading fade-out
 _IS_RAVEN_DEVICE = is_raven_device()
 
 
@@ -147,13 +160,43 @@ def run(
 
             window = SimulatorRunApp(app_widget)
 
-        window.show()
-        window.move(0, 0)
+        # Start hidden so the first-paint pop-in is never seen. On device we
+        # also delay showing the window until after the launcher has faded its
+        # loading screen out — the opaque app window would otherwise occlude
+        # that fade. In the simulator there's no separate launcher window, so
+        # show immediately and just reveal on ready.
+        if hasattr(window, "start_hidden"):
+            window.start_hidden()
+        device_handoff = uses_ravend_ipc()
+        if not device_handoff:
+            window.show()
+            window.move(0, 0)
         log.info("Application started.")
+
+        def _show_and_reveal() -> None:
+            if device_handoff:
+                window.show()
+                window.move(0, 0)
+            if hasattr(window, "reveal"):
+                window.reveal(APP_REVEAL_MS)
+
+        def _on_ready(aid: str = app_id) -> None:
+            # Tell the launcher we're ready so it starts fading its loading
+            # screen out; once that's had time to play, show and bloom in.
+            _send_app_launched_signal(app_id=aid)
+            if device_handoff:
+                Routine(
+                    interval_ms=APP_LOADING_FADEOUT_MS,
+                    invoke=_show_and_reveal,
+                    mode="delay",
+                    parent=app,
+                )
+            else:
+                _show_and_reveal()
 
         Routine(
             interval_ms=APP_LAUNCHED_SIGNAL_DELAY_MS,
-            invoke=lambda aid=app_id: _send_app_launched_signal(app_id=aid),
+            invoke=_on_ready,
             mode="delay",
             parent=app,
         )
@@ -204,6 +247,11 @@ class RunApp(QMainWindow):
         self.background_buttons = []
         try:
             self.setWindowTitle("Raven App (alpha v0.1)")
+            # Window background must be black, not Qt's default light palette:
+            # while the app is hidden/mid-reveal the central widget is
+            # transparent, and black reads as transparent on the waveguide
+            # (a white flash would be a bright, jarring occlusion instead).
+            self.setStyleSheet("QMainWindow { background-color: #000000; }")
             total_window_width = APP_WINDOW_RESOLUTION[0]
             total_window_height = APP_WINDOW_RESOLUTION[1]
             self.setFixedSize(int(total_window_width), int(total_window_height))
@@ -225,6 +273,27 @@ class RunApp(QMainWindow):
         except Exception as e:
             log.error(f"Failed to initialize RunApp: {e}", exc_info=True)
             raise
+
+    def start_hidden(self) -> None:
+        """Make the app content transparent until revealed (avoids first-paint
+        pop-in; enables the ready-time fade-in)."""
+        central = self.centralWidget()
+        if central is not None:
+            effect = QGraphicsOpacityEffect(central)
+            effect.setOpacity(0.0)
+            central.setGraphicsEffect(effect)
+
+    def reveal(self, duration_ms: int) -> None:
+        """Fade the app content in (handoff cross-fade with the launcher)."""
+        central = self.centralWidget()
+        if central is not None:
+            fade_in(central, duration=duration_ms)
+
+    def conceal(self, duration_ms: int) -> None:
+        """Fade the app content out before exit (mirror of reveal)."""
+        central = self.centralWidget()
+        if central is not None:
+            fade_out(central, duration=duration_ms)
 
     def closeEvent(self, event) -> None:
         """Clean up before the host window closes on a Raven device."""

@@ -34,6 +34,7 @@ from .utils_light import load_config
 
 _painter_warning_logged: bool = False
 _qt_default_message_handler = None
+_filter_installed: bool = False
 
 
 class RavenCurve(Enum):
@@ -154,12 +155,18 @@ def _qt_message_handler(msg_type, context, message: str) -> None:
         "QPainter::begin" in message
         or "QPainter::translate" in message
         or "Painter not active" in message
+        or "Unbalanced save/restore" in message
     ):
         if not _painter_warning_logged:
             _painter_warning_logged = True
             print(message)
         return
-    if _qt_default_message_handler is not None:
+    # Guard against ever calling ourselves — a double-install can otherwise
+    # capture this handler as the "previous" one and recurse infinitely.
+    if (
+        _qt_default_message_handler is not None
+        and _qt_default_message_handler is not _qt_message_handler
+    ):
         _qt_default_message_handler(msg_type, context, message)
     else:
         import sys
@@ -168,9 +175,15 @@ def _qt_message_handler(msg_type, context, message: str) -> None:
 
 
 def _install_painter_warning_filter() -> None:
-    global _qt_default_message_handler
-    if _qt_default_message_handler is None:
-        _qt_default_message_handler = qInstallMessageHandler(_qt_message_handler)
+    # Install exactly once. Don't infer "already installed" from the return
+    # value of qInstallMessageHandler — on a fresh process it returns None
+    # (no prior handler), which would let us re-install and capture our own
+    # handler as the default (infinite recursion).
+    global _qt_default_message_handler, _filter_installed
+    if _filter_installed:
+        return
+    _filter_installed = True
+    _qt_default_message_handler = qInstallMessageHandler(_qt_message_handler)
 
 
 def _fade_widget(

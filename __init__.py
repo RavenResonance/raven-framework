@@ -20,34 +20,38 @@ interactive applications with support for gaze-based input, voice input, and mod
 
 """
 
+from importlib import import_module
 from typing import Any
 
-from .components.button import Button
-from .components.container import Container
-from .components.expanding_icon import ExpandingIcon
-from .components.horizontal_container import HorizontalContainer
-from .components.icon import Icon
-from .components.scroll_view import ScrollView
-from .components.spacer import Spacer
-from .components.text_box import TextBox
-from .components.vertical_container import VerticalContainer
-from .core.raven_app import RavenApp
-from .core.run_app import RunApp
+# Only the truly light (no-Qt) helpers are eager. Everything that pulls in
+# PySide6 — the UI components, RavenApp/RunApp, animation_utils, AsyncRunner,
+# Routine — is loaded lazily via __getattr__ so that importing raven_framework
+# (or its light helpers) does NOT load Qt. This keeps non-UI consumers
+# (manager, subprocess_manager, admin_client) Qt-free and their memory small.
 from .helpers import themes
-
-# Essential UI components (always loaded - lightweight)
-from .helpers.animation_utils import (
-    RavenCurve,
-    fade_in,
-    fade_out,
-    make_property_animation,
-    resolve_curve,
-)
-from .helpers.async_runner import AsyncRunner
 from .helpers.logger import *
-from .helpers.routine import Routine
 from .helpers.themes import *
 from .helpers.utils_light import *
+
+# name -> component submodule (under .components), loaded on first access
+_COMPONENTS = {
+    "Button": "button",
+    "Container": "container",
+    "ExpandingIcon": "expanding_icon",
+    "HorizontalContainer": "horizontal_container",
+    "Icon": "icon",
+    "ScrollView": "scroll_view",
+    "Spacer": "spacer",
+    "TextBox": "text_box",
+    "VerticalContainer": "vertical_container",
+}
+_ANIMATION_EXPORTS = {
+    "RavenCurve",
+    "fade_in",
+    "fade_out",
+    "make_property_animation",
+    "resolve_curve",
+}
 
 
 def __getattr__(name: str) -> Any:
@@ -73,6 +77,31 @@ def __getattr__(name: str) -> Any:
         - Heavy UI components: WebViewer, OpenAiHelper, MediaViewer, ModelViewer
         - Peripherals: Camera, Microphone, Speaker, IMU, EyeControl, ClickButton, HandGestureDetector
     """
+    # UI components (Qt-backed) — deferred so the light import path stays Qt-free
+    if name in _COMPONENTS:
+        module = import_module(f".components.{_COMPONENTS[name]}", __name__)
+        return getattr(module, name)
+    if name == "RavenApp":
+        from .core.raven_app import RavenApp
+
+        return RavenApp
+    if name == "RunApp":
+        from .core.run_app import RunApp
+
+        return RunApp
+    if name in _ANIMATION_EXPORTS:
+        from .helpers import animation_utils
+
+        return getattr(animation_utils, name)
+    if name == "AsyncRunner":
+        from .helpers.async_runner import AsyncRunner
+
+        return AsyncRunner
+    if name == "Routine":
+        from .helpers.routine import Routine
+
+        return Routine
+
     # Heavy utilities (OpenCV/NumPy functions only)
     heavy_utils = [
         "convert_ndarray_to_pixmap_image",

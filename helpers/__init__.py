@@ -18,10 +18,11 @@ Import from here for a cleaner API, e.g.:
 
 from typing import Any
 
-from .animation_utils import fade_in, fade_out
-from .async_runner import AsyncRunner
+# NOTE: animation_utils, async_runner and routine import PySide6 at module load.
+# They are loaded lazily (see __getattr__) so that importing this package for the
+# light helpers below (logger, themes, utils_light) does NOT pull in Qt — that
+# keeps non-UI consumers (manager, subprocess_manager, admin_client) Qt-free.
 from .logger import get_logger
-from .routine import Routine
 from .themes import (
     RAVEN_CORE,
     Borders,
@@ -50,7 +51,20 @@ from .utils_light import (
 
 
 def __getattr__(name: str) -> Any:
-    """Lazy load heavy helpers (OpenAiHelper, utils with OpenCV/NumPy) on first access."""
+    """Lazy load Qt-backed and heavy helpers on first access."""
+    # Qt-backed helpers (defer so the light path stays Qt-free)
+    if name in ("fade_in", "fade_out"):
+        from . import animation_utils
+
+        return getattr(animation_utils, name)
+    if name == "AsyncRunner":
+        from .async_runner import AsyncRunner
+
+        return AsyncRunner
+    if name == "Routine":
+        from .routine import Routine
+
+        return Routine
     if name == "OpenAiHelper":
         from .open_ai_helper import OpenAiHelper
 

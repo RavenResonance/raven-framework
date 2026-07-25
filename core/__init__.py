@@ -14,12 +14,22 @@ Import from here for a cleaner API, e.g.:
 """
 
 from .raven_app import RavenApp
-from .raven_simulator import (
-    SimulatorBackgroundPreset,
-    SimulatorBackgroundWidget,
-    SimulatorRunApp,
-)
 from .run_app import RunApp
+
+_SIMULATOR_EXPORTS = {
+    "SimulatorBackgroundPreset",
+    "SimulatorBackgroundWidget",
+    "SimulatorRunApp",
+}
+
+
+def __getattr__(name: str):
+    if name in _SIMULATOR_EXPORTS:
+        from . import raven_simulator
+
+        return getattr(raven_simulator, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     "RavenApp",
