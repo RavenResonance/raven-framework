@@ -30,7 +30,10 @@ from PySide6.QtCore import (
 )
 from PySide6.QtWidgets import QGraphicsOpacityEffect, QWidget
 
+from .logger import get_logger
 from .utils_light import load_config
+
+log = get_logger("AnimationUtils")
 
 _painter_warning_logged: bool = False
 _qt_default_message_handler = None
@@ -219,17 +222,26 @@ def _fade_widget(
     resolved_curve = resolve_curve(curve)
 
     def start_animation() -> None:
-        fade_anim = make_property_animation(
-            effect,
-            b"opacity",
-            start_value,
-            end_value,
-            duration_ms,
-            resolved_curve,
-            widget,
-        )
-        fade_anim.start()
-        widget._fade_animation = fade_anim
+        try:
+            fade_anim = make_property_animation(
+                effect,
+                b"opacity",
+                start_value,
+                end_value,
+                duration_ms,
+                resolved_curve,
+                widget,
+            )
+            fade_anim.start()
+            widget._fade_animation = fade_anim
+        except RuntimeError as e:
+            log.warning(f"fade animation target died before deferred start: {e}")
+            # widget (or its effect) was torn down between this being
+            # scheduled and this deferred callback firing -- nothing left to
+            # animate, so no-op instead of crashing the whole app (observed
+            # as a shiboken "already deleted" abort when a caller fades a
+            # widget that gets removed again almost immediately after).
+            pass
 
     QTimer.singleShot(0, start_animation)
 

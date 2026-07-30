@@ -144,7 +144,16 @@ class AsyncRunner:
             runner.run(process_data, on_complete=update_ui)
             ```
         """
-        emitter = AsyncSignalEmitter()
+        # Parented to self.threadpool (a QObject, stable for this AsyncRunner's
+        # whole lifetime) rather than left parentless. A parentless QObject's
+        # C++-side destruction timing is governed entirely by Python's GC,
+        # which can run at any point -- including while Qt still has this
+        # emitter's cross-thread "finished" signal delivery queued for the
+        # main thread. Deleting it out from under that queued delivery is a
+        # use-after-free that segfaults the process (confirmed via a real
+        # crash report). deleteLater() below still cleans it up properly
+        # afterward, so this doesn't leak.
+        emitter = AsyncSignalEmitter(self.threadpool)
 
         if not callable(func):
             raise TypeError(f"func must be callable, got {type(func).__name__}")
@@ -176,7 +185,30 @@ class AsyncRunner:
                 except Exception as e:
                     log.error(f"Exception in AsyncRunner Worker: {e}", exc_info=True)
                 finally:
-                    emitter.finished.emit()
+                    try:
+                        emitter.finished.emit()
+                        # Posted after the emit, so it's queued behind the
+                        # "finished" signal's own queued cross-thread
+                        # delivery to on_complete on the main thread -- Qt
+                        # delivers posted events to an object in the order
+                        # they were posted, so on_complete runs before this
+                        # deferred delete executes. Explicit cleanup instead
+                        # of just relying on the threadpool parent (which
+                        # would otherwise accumulate one emitter per poll
+                        # tick, forever, as long as this AsyncRunner exists).
+                        emitter.deleteLater()
+                    except RuntimeError as e:
+                        # App shutting down (or some other path) already
+                        # destroyed emitter while func() -- running on this
+                        # background thread -- was still doing blocking work.
+                        # Emitting a signal (or scheduling deleteLater) from a
+                        # background thread on an already-deleted C++ object
+                        # is a use-after-free that segfaults the process
+                        # (confirmed via a real crash report); log and move
+                        # on instead -- there's nothing left to notify anyway.
+                        log.debug(
+                            f"AsyncRunner emitter already deleted, skipping emit: {e}"
+                        )
 
         worker = Worker()
         try:

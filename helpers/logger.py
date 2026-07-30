@@ -222,7 +222,7 @@ class RedactingFormatter(logging.Formatter):
 
 
 formatter = RedactingFormatter(
-    fmt="%(asctime)s [%(levelname)s] [%(name)s] [%(module)s.%(funcName)s] -> %(message)s",
+    fmt="%(asctime)s.%(msecs)03d [%(levelname)s] [%(name)s] [%(module)s.%(funcName)s] -> %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
