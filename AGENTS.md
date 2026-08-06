@@ -275,16 +275,29 @@ def on_button_click(self, new_text):
 
 #### Icon
 
-Circular or rounded-rect icon with dwell-click interaction.
+Circular or rounded-rect icon with dwell-click interaction. Two styles via
+`type`:
+
+- `type="simple"` (default): classic behavior — hover scales the icon up,
+  then a visible progress indicator fills over `dwell_time` before `clicked`
+  fires. `dwell_time`/`delay_time` only apply to this style.
+- `type="pulse"`: hover grows the icon and shows a halo sampled from the
+  image's rim colors; a slow breath pulse acts as the dwell timer, then the
+  icon expands in place and `clicked` fires. Animation defaults come from
+  config `animation.app_launch_icon`. Used by the Canopy app launcher and
+  the RavenApp home button (whose blackout sweeps the whole app).
 
 ```python
 from raven_framework.components.icon import Icon
 
-# Simple icon
+# Simple icon (default, progress-arc dwell)
 icon = Icon(background_image_path="icon.png")
 
 # With custom size
 icon = Icon(background_image_path="icon.png", size=150)
+
+# Pulse launch-style dwell
+icon = Icon(background_image_path="icon.png", type="pulse")
 
 # Click handlers
 self.icon = Icon(size=80)
@@ -294,9 +307,13 @@ def on_icon_click(self):
     self.icon.set_text("Clicked!")
 ```
 
-**Key params:** `background_image_path`, `size`, `background_color` (hex), `center_text`, `text_size`, `text_color` (hex), `corner_radius`, `outline_width`, `outline_color`, `dwell_time`, `is_square`, `enable_click`, `bottom_text`, `disabled`
+**Key params:** `background_image_path`, `size`, `background_color` (hex), `center_text`, `text_size`, `text_color` (hex), `corner_radius`, `outline_width`, `outline_color`, `dwell_time` (simple only), `is_square`, `enable_click`, `bottom_text`, `disabled`, `type` ("simple" | "pulse")
 
-**Key methods:** `set_text(new_text: str)`, `on_clicked(callback, *args, **kwargs)`, `set_background_image(image_path: str)`, `set_disabled(disabled: bool)`, `set_enabled(enabled: bool)`, `is_disabled() -> bool`
+**Pulse-only params (defaults from config `animation.app_launch_icon`):** `pulse_count`, `base_scale`, `pulse_peak_scale`, `pulse_dip_scale`, `expand_max_scale`, per-phase `*_ms` durations and `*_curve` easings, `skip_expand`, `halo_*` tuning, and launch-treatment hooks (`overlay_parent`, `screen_width`/`screen_height`, `blackout_ms`, `occlusion_icons_provider`) used by the Canopy app launcher.
+
+**Key methods:** `set_text(new_text: str)`, `on_clicked(callback, *args, **kwargs)`, `set_background_image(image_path: str)`, `set_disabled(disabled: bool)`, `set_enabled(enabled: bool)`, `is_disabled() -> bool`, `set_interaction_enabled(enabled: bool)`
+
+**Note:** a pulse icon widget is padded for scale overflow (`scale_pad` attribute); use `circle_bounds_in_widget()` when positioning it by the visible circle.
 
 #### Spacer
 

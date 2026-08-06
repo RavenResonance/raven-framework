@@ -4,7 +4,7 @@
     "APP_RESOLUTION": [640, 640]
   },
   "fps": {
-    "UI_FPS": 30,
+    "UI_FPS": 60,
     "SIMULATOR_FPS": 20
   },
   "deployment": {
@@ -28,6 +28,7 @@
     "DEFAULT_ICON_SIZE": 80,
     "DEFAULT_EXTRA_WIDTH": 10,
     "DEFAULT_EXTRA_HEIGHT": 140,
+    "DEFAULT_BOTTOM_TEXT_SPACING": 13,
     "LABEL_FONT_SIZE_OFFSET": 2,
     "SQUARE_CORNER_RADIUS_RATIO": 0.25,
     "SCALE_THRESHOLD": 0.005,
@@ -95,7 +96,30 @@
     },
     "app_launch": {
       "APP_HANDOFF_MS": 800,
-      "APP_EXIT_FADE_MS": 1000
+      "APP_EXIT_FADE_MS": 1000,
+      "HOME_BLACKOUT_HOLD_MS": 2000
+    },
+    "app_launch_icon": {
+      "HOVER_GROW_FROM_SCALE": 1.0,
+      "HOVER_GROW_TO_SCALE": 1.08,
+      "PULSE_DIP_SCALE": 0.85,
+      "EXPAND_TO_SCALE": 1.5,
+      "PULSE_COUNT": 1,
+      "HOVER_GROW_MS": 480,
+      "HOVER_GROW_CURVE": "IN_OUT_SINE",
+      "HOVER_HOLD_MS": 550,
+      "BREATH_DIP_MS": 1750,
+      "BREATH_DIP_CURVE": "IN_OUT_SINE",
+      "BREATH_RETURN_MS": 3000,
+      "BREATH_RETURN_CURVE": "IN_OUT_SINE",
+      "FINAL_DIP_MS": 3000,
+      "FINAL_DIP_CURVE": "IN_OUT_SINE",
+      "EXPAND_MS": 300,
+      "EXPAND_CURVE": "IN_OUT_SINE",
+      "BLACKOUT_MS": 400,
+      "BLACKOUT_CURVE": "IN_OUT_SINE",
+      "RESET_ON_LEAVE_MS": 200,
+      "RESET_ON_LEAVE_CURVE": "OUT_SINE"
     }
   }
 }

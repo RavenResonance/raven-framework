@@ -59,6 +59,10 @@ ENABLE_TIME_DISPLAY = False
 
 APP_EXIT_FADE_MS = _config["animation"]["app_launch"]["APP_EXIT_FADE_MS"]
 
+# How long the home button's launch blackout stays fully black after its
+# sweep, so the exit fade underneath finishes out of sight.
+HOME_BLACKOUT_HOLD_MS = _config["animation"]["app_launch"]["HOME_BLACKOUT_HOLD_MS"]
+
 _wake_cfg = _config["animation"]["wake"]
 
 
@@ -123,11 +127,32 @@ class RavenApp(Container):
         )
 
         close_icon_size = 80
+        # Pulse home button: the dwell expands it to black and sweeps the
+        # launch blackout across the entire app before on_home_clicked fires.
+        # The blackout then holds full-black long enough for the app's exit
+        # fade to play out hidden behind it — a dwell exit cuts straight to
+        # black, while a plain click (no expand/blackout) keeps the visible
+        # exit fade.
         self.close_icon = Icon(
-            is_square=False, background_image_path=home_icon_path, size=close_icon_size
+            is_square=False,
+            background_image_path=home_icon_path,
+            size=close_icon_size,
+            type="pulse",
+            overlay_parent=self,
+            screen_width=RAVEN_APP_WIDTH,
+            screen_height=RAVEN_APP_HEIGHT,
+            blackout_hold_ms=HOME_BLACKOUT_HOLD_MS,
         )
         self.close_icon.on_clicked(self.on_home_clicked)
-        self.add(self.close_icon, RAVEN_APP_WIDTH - close_icon_size - 3, 10)
+        # Pulse-type icons pad their widget for scale overflow; offset by the
+        # circle's position inside the widget so the visible icon lands where
+        # the unpadded icon used to.
+        icon_left, icon_top, _, _ = self.close_icon.circle_bounds_in_widget()
+        self.add(
+            self.close_icon,
+            RAVEN_APP_WIDTH - close_icon_size - 13 - icon_left,
+            15 - icon_top,
+        )
         self.close_icon.raise_()
 
         # Catches gaze/mouse while asleep (simulator composite is mouse-transparent)
@@ -256,9 +281,7 @@ class RavenApp(Container):
             return
         self._exiting = True
         try:
-            log.info(
-                "Close button clicked - fading out...", extra={"console": True}
-            )
+            log.info("Close button clicked - fading out...", extra={"console": True})
             self._set_ui_interaction_blocked(True)
             win = self.window()
             if win is not None and hasattr(win, "conceal"):
