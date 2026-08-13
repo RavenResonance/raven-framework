@@ -155,12 +155,6 @@ def test_reveal_icon_smoke(qtbot: QtBot) -> None:
     qtbot.waitExposed(ic)
 
 
-def test_icon_pulse_type_shim_returns_reveal_icon(qtbot: QtBot) -> None:
-    ic = Icon(size=40, type="pulse")
-    qtbot.addWidget(ic)
-    assert isinstance(ic, RevealIcon)
-
-
 def test_pagination_dwell_grace_gates_indicator_icons(qtbot: QtBot) -> None:
     """Page indicators must not register dwells until the bar has expanded
     and the grace period has elapsed — a cursor already parked on an

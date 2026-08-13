@@ -100,56 +100,6 @@ class Icon(QWidget):
 
     clicked = Signal()
 
-    # ------------------------------------------------------------------
-    # DEPRECATED compatibility shim — remove once all callers migrate to
-    # RevealIcon (tracked for removal before the next public release).
-    # ``Icon(type="pulse")`` predates the Icon/RevealIcon split; dispatch
-    # those calls to RevealIcon so existing code keeps working.
-    # ------------------------------------------------------------------
-
-    def __new__(cls, *args, **kwargs):
-        if cls is Icon and kwargs.get("type") == "pulse":
-            from .reveal import RevealIcon
-
-            log.warning(
-                'Icon(type="pulse") is deprecated — use RevealIcon instead',
-                extra={"console": True},
-            )
-            kwargs = {k: v for k, v in kwargs.items() if k != "type"}
-            # Not an Icon subclass, so Python skips Icon.__init__ on it.
-            return RevealIcon(*args, **kwargs)
-        return super().__new__(cls)
-
-    # DEPRECATED: launcher grid statics live on RevealIcon now; these
-    # delegations keep pre-split callers (Icon.grid_origin_x, ...) working.
-    def _deprecated_reveal_static(name):  # noqa: N805 — not a method
-        @staticmethod
-        def _delegate(*args, **kwargs):
-            from .reveal import RevealIcon
-
-            log.warning(
-                f"Icon.{name}() is deprecated — use RevealIcon.{name}()",
-                extra={"console": True},
-            )
-            return getattr(RevealIcon, name)(*args, **kwargs)
-
-        return _delegate
-
-    layout_slot_size = _deprecated_reveal_static("layout_slot_size")
-    layout_row_height = _deprecated_reveal_static("layout_row_height")
-    layout_content_height = _deprecated_reveal_static("layout_content_height")
-    scale_overflow_pad = _deprecated_reveal_static("scale_overflow_pad")
-    grid_origin_x = _deprecated_reveal_static("grid_origin_x")
-    grid_origin_y = _deprecated_reveal_static("grid_origin_y")
-    grid_slot_x_two_app = _deprecated_reveal_static("grid_slot_x_two_app")
-    grid_slot_x_three_app = _deprecated_reveal_static("grid_slot_x_three_app")
-
-    del _deprecated_reveal_static
-
-    # ------------------------------------------------------------------
-    # End of compatibility shim
-    # ------------------------------------------------------------------
-
     def __init__(
         self,
         background_image_path: Optional[str] = None,
