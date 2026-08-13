@@ -324,16 +324,14 @@ def on_icon_click(self):
 
 **Key methods:** `set_text(new_text: str)`, `on_clicked(callback, *args, **kwargs)`, `set_background_image(image_path: str)`, `set_disabled(disabled: bool)`, `set_enabled(enabled: bool)`, `is_disabled() -> bool`, `set_interaction_enabled(enabled: bool)`
 
-**Deprecated:** `Icon(type="pulse")` still works (it returns a `RevealIcon` and logs a warning), as do the `Icon.grid_*`/`Icon.layout_*` static delegations — migrate callers to `RevealIcon`; the shim goes away before the next public release.
-
 #### RevealIcon
 
 The launch-treatment sibling of `Icon`: hover grows the icon and shows a
 halo sampled from the image's rim colors; a slow breath pulse acts as the
 dwell timer, then the icon expands in place and `clicked` fires. When
 `overlay_parent` is set, a fullscreen blackout sweeps from the icon center
-first. Animation defaults come from config `animation.app_launch_icon`.
-Used by the Canopy app launcher and the RavenApp home button (whose
+first. Animation defaults come from config `animation.reveal_icon`.
+Used by the system app launcher and the RavenApp home button (whose
 blackout sweeps the whole app).
 
 ```python
@@ -352,7 +350,7 @@ icon = RevealIcon(
 icon.on_clicked(self.launch_app, app_id)
 ```
 
-**Key params:** shared with `Icon` (`background_image_path`, `size`, `background_color`, `center_text`, `is_square`, `enable_click`, `bottom_text`, `disabled`, ...) minus the simple-dwell timings, plus (defaults from config `animation.app_launch_icon`): `pulse_count`, `base_scale`, `pulse_peak_scale`, `pulse_dip_scale`, `expand_max_scale`, per-phase `*_ms` durations and `*_curve` easings, `skip_expand`, `halo_*` tuning, and launch-treatment hooks (`overlay_parent`, `screen_width`/`screen_height`, `blackout_ms`, `blackout_hold_ms`, `occlusion_icons_provider`) used by the Canopy app launcher.
+**Key params:** shared with `Icon` (`background_image_path`, `size`, `background_color`, `center_text`, `is_square`, `enable_click`, `bottom_text`, `disabled`, ...) minus the simple-dwell timings, plus (defaults from config `animation.reveal_icon`): `pulse_count`, `base_scale`, `pulse_peak_scale`, `pulse_dip_scale`, `expand_max_scale`, per-phase `*_ms` durations and `*_curve` easings, `skip_expand`, `halo_*` tuning, and launch-treatment hooks (`overlay_parent`, `screen_width`/`screen_height`, `blackout_ms`, `blackout_hold_ms`, `occlusion_icons_provider`) used by the system app launcher.
 
 **Key methods:** same surface as `Icon`, plus the launcher grid statics (`layout_slot_size`, `layout_row_height`, `scale_overflow_pad`, `grid_origin_x/y`, `grid_slot_x_two_app/three_app`) and `circle_bounds_in_widget()`.
 
