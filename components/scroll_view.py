@@ -61,6 +61,7 @@ DEFAULT_PAGINATION_OUTLINE_FADE_CURVE = resolve_curve(
 )
 DEFAULT_PAGINATION_DWELL_MS = _scroll_cfg["PAGINATION_DWELL_MS"]
 DEFAULT_PAGINATION_DWELL_HOVER_SCALE = _scroll_cfg["PAGINATION_DWELL_HOVER_SCALE"]
+DEFAULT_PAGINATION_DWELL_GRACE_MS = _scroll_cfg["PAGINATION_DWELL_GRACE_MS"]
 
 
 theme = RAVEN_CORE
@@ -74,6 +75,7 @@ class PaginationContainer(QWidget):
         parent=None,
         dwell_hover_scale: float = DEFAULT_PAGINATION_DWELL_HOVER_SCALE,
         dwell_time: int = DEFAULT_PAGINATION_DWELL_MS,
+        dwell_grace_ms: int = DEFAULT_PAGINATION_DWELL_GRACE_MS,
         outline_width: int = 2,
         outline_color: str = "white",
         base_corner_radius_percent: float = 0.5,
@@ -118,6 +120,18 @@ class PaginationContainer(QWidget):
         self.dwell_timer.setSingleShot(True)
         self.dwell_timer.timeout.connect(self._on_dwell_complete)
         self.dwell_time = dwell_time
+
+        # The indicator icons stay dwell-disabled while the bar is collapsed
+        # or mid-expand; this timer arms them only once the expansion has
+        # settled for dwell_grace_ms. Without it, a cursor already parked on
+        # an indicator when the bar starts growing has its dwell counting
+        # through the whole expand animation and fires an accidental click
+        # the moment it lands.
+        self.dwell_grace_ms = max(0, int(dwell_grace_ms))
+        self._icons_armed = True  # set_icons() disarms once icons attach
+        self._icon_grace_timer = QTimer(self)
+        self._icon_grace_timer.setSingleShot(True)
+        self._icon_grace_timer.timeout.connect(self._arm_icon_dwell)
 
         self.scale_animation = QPropertyAnimation(self, b"geometry", self)
         self.scale_animation.setDuration(self.animation_duration_ms)
@@ -212,6 +226,11 @@ class PaginationContainer(QWidget):
         for icon in icons:
             if not hasattr(icon, "_original_pos"):
                 icon._original_pos = None
+        # Fresh icons start dwell-disabled until the bar has expanded and the
+        # grace period has passed. Skipped while hovered so a mid-hover
+        # relayout (e.g. a resize) can't disarm an already-armed bar.
+        if not self.is_dwelling:
+            self._disarm_icon_dwell()
 
     def _update_icon_sizes(self, scale):
         """Update icon sizes based on scale factor."""
@@ -271,6 +290,7 @@ class PaginationContainer(QWidget):
         """Handle mouse leave - scale down and fade out border."""
         self.is_dwelling = False
         self.dwell_timer.stop()
+        self._disarm_icon_dwell()
         self.target_scale = 1.0
         self._animate_scale()
         self._outline_fade_anim.stop()
@@ -289,6 +309,21 @@ class PaginationContainer(QWidget):
         if self.is_dwelling:
             self.target_scale = self.dwell_hover_scale
             self._animate_scale()
+
+    def _arm_icon_dwell(self) -> None:
+        """Let the indicator icons register dwells (expansion has settled)."""
+        if not self.is_dwelling:
+            return  # bar collapsed again before the grace period elapsed
+        self._icons_armed = True
+        for icon in self.icons:
+            icon.set_interaction_enabled(True)
+
+    def _disarm_icon_dwell(self) -> None:
+        """Block indicator dwells (bar collapsed or expansion in progress)."""
+        self._icons_armed = False
+        self._icon_grace_timer.stop()
+        for icon in self.icons:
+            icon.set_interaction_enabled(False)
 
     def _animate_scale(self):
         """Animate the scale change."""
@@ -330,6 +365,8 @@ class PaginationContainer(QWidget):
                     1.0 + (self.dwell_hover_scale - 1.0) * scale_factor
                 )
                 self._update_icon_positions(scale_factor)
+                if self.is_dwelling and not self._icons_armed:
+                    self._icon_grace_timer.start(self.dwell_grace_ms)
             else:
                 smaller_dimension = min(self.base_width, self.base_height)
                 self.current_corner_radius = int(
@@ -412,6 +449,9 @@ class ScrollView(QWidget):
         pagination_dwell_hover_scale (float): Scale after dwell time. Defaults from
             ``animation.scroll_bar.PAGINATION_DWELL_HOVER_SCALE`` in framework config.
         pagination_dwell_time (int): Time (ms) before scaling to final hover scale.
+        pagination_dwell_grace_ms (int): Pause (ms) after the bar finishes expanding
+            before the page indicators start registering dwells — prevents accidental
+            clicks from a cursor already parked on an indicator mid-expand.
             Defaults from ``animation.scroll_bar.PAGINATION_DWELL_MS`` in framework config.
         pagination_outline_width (int): Width of pagination container outline. Defaults to 2.
         pagination_outline_color (str): Color of pagination container outline. Defaults to "white".
@@ -443,6 +483,7 @@ class ScrollView(QWidget):
         pagination_indicator_color: str = theme.basic_palette.gray,
         pagination_dwell_hover_scale: float = DEFAULT_PAGINATION_DWELL_HOVER_SCALE,
         pagination_dwell_time: int = DEFAULT_PAGINATION_DWELL_MS,
+        pagination_dwell_grace_ms: int = DEFAULT_PAGINATION_DWELL_GRACE_MS,
         pagination_outline_width: int = 2,
         pagination_outline_color: str = theme.borders.color,
         pagination_corner_radius_percent: float = 0.5,
@@ -492,6 +533,7 @@ class ScrollView(QWidget):
         self.pagination_indicator_color = pagination_indicator_color
         self.pagination_dwell_hover_scale = pagination_dwell_hover_scale
         self.pagination_dwell_time = pagination_dwell_time
+        self.pagination_dwell_grace_ms = pagination_dwell_grace_ms
         self.pagination_outline_width = pagination_outline_width
         self.pagination_outline_color = pagination_outline_color
         self.pagination_corner_radius_percent = pagination_corner_radius_percent
@@ -586,6 +628,7 @@ class ScrollView(QWidget):
                 self,
                 dwell_hover_scale=self.pagination_dwell_hover_scale,
                 dwell_time=self.pagination_dwell_time,
+                dwell_grace_ms=self.pagination_dwell_grace_ms,
                 outline_width=self.pagination_outline_width,
                 outline_color=self.pagination_outline_color,
                 base_corner_radius_percent=self.pagination_corner_radius_percent,
@@ -604,6 +647,7 @@ class ScrollView(QWidget):
             self,
             dwell_hover_scale=self.pagination_dwell_hover_scale,
             dwell_time=self.pagination_dwell_time,
+            dwell_grace_ms=self.pagination_dwell_grace_ms,
             outline_width=self.pagination_outline_width,
             outline_color=self.pagination_outline_color,
             base_corner_radius_percent=self.pagination_corner_radius_percent,

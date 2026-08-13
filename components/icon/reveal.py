@@ -596,9 +596,14 @@ class RevealIcon(QWidget):
         content_height = self.layout_content_height(
             self.size, bool(self.bottom_text), self.bottom_text_spacing
         )
+        # Pad the height on BOTH sides of the content, like the width. With a
+        # single pad the no-label layout leaves only ~5px of slack below the
+        # circle, so the dwell expand (size/2 * (expand_max_scale - 1) ≈ one
+        # full pad) painted past the widget rect and Qt clipped the circle's
+        # bottom edge for the instant before the blackout covered it.
         self.setFixedSize(
             layout_width + 2 * self._scale_pad,
-            content_height + self._scale_pad,
+            content_height + 2 * self._scale_pad,
         )
         self.setAttribute(Qt.WA_Hover, True)
         self.setAutoFillBackground(False)
@@ -1118,7 +1123,10 @@ class RevealIcon(QWidget):
     def _icon_center_y(self) -> float:
         if self.bottom_text:
             return self._scale_pad + self.size / 2
-        return self._scale_pad + (self.height() - self._scale_pad) / 2
+        # Center within the content area (widget height minus the pad above
+        # and below it) — same visible position as before the height gained
+        # its bottom pad.
+        return self._scale_pad + (self.height() - 2 * self._scale_pad) / 2
 
     def _label_top_y(self) -> int:
         return self._scale_pad + self.size + self.bottom_text_spacing

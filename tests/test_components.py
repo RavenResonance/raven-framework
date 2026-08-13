@@ -36,7 +36,7 @@ from raven_framework.components.cards import (
 from raven_framework.components.container import Container
 from raven_framework.components.expanding_icon import ExpandingIcon
 from raven_framework.components.horizontal_container import HorizontalContainer
-from raven_framework.components.icon import Icon
+from raven_framework.components.icon import Icon, RevealIcon
 from raven_framework.components.media_viewer import MediaViewer
 from raven_framework.components.model_viewer import ModelViewer, load_obj_mesh
 from raven_framework.components.scroll_view import ScrollView
@@ -146,6 +146,74 @@ def test_icon_smoke(qtbot: QtBot) -> None:
     qtbot.addWidget(ic)
     ic.show()
     qtbot.waitExposed(ic)
+
+
+def test_reveal_icon_smoke(qtbot: QtBot) -> None:
+    ic = RevealIcon(size=48)
+    qtbot.addWidget(ic)
+    ic.show()
+    qtbot.waitExposed(ic)
+
+
+def test_icon_pulse_type_shim_returns_reveal_icon(qtbot: QtBot) -> None:
+    ic = Icon(size=40, type="pulse")
+    qtbot.addWidget(ic)
+    assert isinstance(ic, RevealIcon)
+
+
+def test_pagination_dwell_grace_gates_indicator_icons(qtbot: QtBot) -> None:
+    """Page indicators must not register dwells until the bar has expanded
+    and the grace period has elapsed — a cursor already parked on an
+    indicator during the expand animation used to click the moment its own
+    dwell timer ran out."""
+    from PySide6.QtCore import QEvent
+
+    from raven_framework.components.scroll_view import PaginationContainer
+
+    parent = QWidget()
+    qtbot.addWidget(parent)
+    pc = PaginationContainer(parent)
+    icons = [Icon(size=10) for _ in range(3)]
+    for ic in icons:
+        ic.setParent(pc)
+    pc.set_icons(icons, 5, 5)
+
+    # Collapsed bar: indicators disarmed.
+    assert all(not ic.isEnabled() for ic in icons)
+
+    # Grace timer fires while still hovered/expanded -> armed.
+    pc.is_dwelling = True
+    pc._arm_icon_dwell()
+    assert all(ic.isEnabled() for ic in icons)
+
+    # Leaving collapses the bar and disarms immediately.
+    pc.leaveEvent(QEvent(QEvent.Type.Leave))
+    assert all(not ic.isEnabled() for ic in icons)
+
+    # A stale grace timeout after collapse must NOT re-arm.
+    pc._arm_icon_dwell()
+    assert all(not ic.isEnabled() for ic in icons)
+
+
+@pytest.mark.parametrize("bottom_text", ["", "Home"])
+def test_reveal_icon_expanded_circle_fits_within_widget(
+    qtbot: QtBot, bottom_text: str
+) -> None:
+    """The fully-expanded dwell circle must fit inside the widget rect.
+
+    Qt clips painting to the widget, so any overflow shows as the circle's
+    edge getting cut off mid-expand. The no-label (home button) case used to
+    overflow the bottom by ~scale_pad because the height only carried one
+    pad of slack.
+    """
+    ic = RevealIcon(size=80, bottom_text=bottom_text)
+    qtbot.addWidget(ic)
+    radius = (ic.size / 2) * ic.expand_max_scale
+    cx, cy = ic._icon_center_x(), ic._icon_center_y()
+    assert cy + radius <= ic.height(), "circle bottom clips the widget rect"
+    assert cy - radius >= 0, "circle top clips the widget rect"
+    assert cx - radius >= 0, "circle left clips the widget rect"
+    assert cx + radius <= ic.width(), "circle right clips the widget rect"
 
 
 def test_icon_clicked_and_set_text(qtbot: QtBot) -> None:
