@@ -13,8 +13,9 @@
 """
 Click button sensor for Raven Framework.
 
-On Raven devices, uses sensorlib. In simulator mode, double-tap Enter simulates
-a double click.
+The physical click button reaches Qt as an Enter key event on Raven devices,
+and the simulator maps Enter the same way — so one mechanism serves both:
+an app-wide event filter that turns a double Enter press into a double-click.
 """
 
 import time
@@ -26,7 +27,6 @@ from PySide6.QtWidgets import QApplication
 
 from ..helpers.logger import get_logger
 from ..helpers.routine import Routine
-from .sensor_utils import SensorType, initialize_sensorlib_client
 
 log = get_logger("ClickButton")
 
@@ -35,7 +35,7 @@ _DEFAULT_DOUBLE_CLICK_INTERVAL_MS = 400
 # One physical Enter can deliver both Key_Return and Key_Enter; debounce those.
 _ENTER_PRESS_DEBOUNCE_S = 0.1
 
-# Shared simulator state (one Enter-key filter for the whole app)
+# Shared state (one Enter-key filter for the whole app)
 _double_click_pending = False
 _event_filter_installed = False
 _key_monitor: Optional["_ClickButtonKeyMonitor"] = None
@@ -44,7 +44,7 @@ _ENTER_KEYS = frozenset({Qt.Key.Key_Return, Qt.Key.Key_Enter})
 
 
 class _ClickButtonKeyMonitor(QObject):
-    """Event filter for Enter key double-press in simulator mode."""
+    """Event filter that counts debounced Enter presses toward a double-click."""
 
     def __init__(
         self, parent: Optional[QObject] = None, *, double_click_interval_s: float
@@ -54,7 +54,7 @@ class _ClickButtonKeyMonitor(QObject):
         self._last_press_time: Optional[float] = None
         self._last_key_event_time: Optional[float] = None
 
-    def _register_simulator_press(self) -> None:
+    def _register_press(self) -> None:
         """Count a debounced Enter press toward a double-click."""
         global _double_click_pending
 
@@ -78,12 +78,12 @@ class _ClickButtonKeyMonitor(QObject):
                 ):
                     return False
                 self._last_key_event_time = now
-                self._register_simulator_press()
+                self._register_press()
         return False
 
 
-def _setup_simulator_key_monitoring(double_click_interval_s: float) -> None:
-    """Install a single app-wide Enter key filter for simulator mode."""
+def _setup_key_monitoring(double_click_interval_s: float) -> None:
+    """Install a single app-wide Enter key filter."""
     global _event_filter_installed, _key_monitor
 
     try:
@@ -100,15 +100,17 @@ def _setup_simulator_key_monitoring(double_click_interval_s: float) -> None:
             )
             app.installEventFilter(_key_monitor)
             _event_filter_installed = True
-            log.info(
-                "ClickButton: Enter key double-press monitoring enabled for simulation"
-            )
+            log.info("ClickButton: Enter key double-press monitoring enabled")
     except Exception as e:
         log.error(f"Error setting up key monitoring: {e}", exc_info=True)
 
 
 class ClickButton:
-    """Physical click button; poll or register for double-click."""
+    """Physical click button; poll or register for double-click.
+
+    The button arrives as an Enter key event on device and simulator alike,
+    so detection is one shared Qt event filter — no daemon round-trips.
+    """
 
     def __init__(
         self,
@@ -117,64 +119,17 @@ class ClickButton:
         *,
         double_click_interval_ms: int = _DEFAULT_DOUBLE_CLICK_INTERVAL_MS,
     ) -> None:
-        """Initialize with optional app_id and app_key for sensorlib entitlements."""
+        """Initialize; app_id and app_key are kept for API compatibility."""
         self._double_click_interval_s = max(
             0.05, int(double_click_interval_ms) / 1000.0
         )
-        self.sensorlib_client = initialize_sensorlib_client(
-            app_id, app_key, SensorType.BUTTON
-        )
-        self._pressed_last_tick = False
-        self._last_press_time: Optional[float] = None
         self._poll_routine: Optional[Routine] = None
-        self.key_monitor: Optional[_ClickButtonKeyMonitor] = None
 
-        if not self.sensorlib_client:
-            log.info(
-                "ClickButton: Using simulator mode (double-tap Enter for simulation)"
-            )
-            _setup_simulator_key_monitoring(self._double_click_interval_s)
-            self.key_monitor = _key_monitor
-
-    def _expire_stale_first_click(self) -> None:
-        """Clear an unmatched first press after the double-click window."""
-        if self._last_press_time is None:
-            return
-        if (time.monotonic() - self._last_press_time) > self._double_click_interval_s:
-            self._last_press_time = None
-
-    def _register_press_edge(self) -> bool:
-        """Record a press edge; return True if it completes a double-click."""
-        now = time.monotonic()
-        if (
-            self._last_press_time is not None
-            and (now - self._last_press_time) <= self._double_click_interval_s
-        ):
-            self._last_press_time = None
-            return True
-        self._last_press_time = now
-        return False
+        _setup_key_monitoring(self._double_click_interval_s)
+        self.key_monitor: Optional[_ClickButtonKeyMonitor] = _key_monitor
 
     def is_button_double_clicked(self) -> bool:
         """Return True once per double-click since the last call."""
-        self._expire_stale_first_click()
-
-        if self.sensorlib_client:
-            try:
-                pressed = self.sensorlib_client.is_click_button_pressed()
-            except Exception as e:
-                log.error(
-                    f"Error checking ClickButton state via sensorlib: {e}",
-                    exc_info=True,
-                )
-                return False
-
-            rising_edge = pressed and not self._pressed_last_tick
-            self._pressed_last_tick = pressed
-            if rising_edge:
-                return self._register_press_edge()
-            return False
-
         global _double_click_pending
         if _double_click_pending:
             _double_click_pending = False
