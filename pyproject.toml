@@ -29,7 +29,8 @@ dev = [
     "pytest-qt>=4.4",
 ]
 audio-simulator = [
-    "simpleaudio==1.0.4",
+    # Windows uses the stdlib winsound fallback instead of simpleaudio.
+    "simpleaudio==1.0.4; sys_platform != 'win32'",
 ]
 hand-gesture = [
     "cvzone>=1.6.1",

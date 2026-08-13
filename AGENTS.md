@@ -57,6 +57,29 @@ python main.py  # or python3 main.py
 python main.py deploy
 ```
 
+### Windows setup notes
+
+Windows has a few extra friction points not present on macOS/Linux. In order of how often they bite:
+
+1. **`python` opens the Microsoft Store.** Use `python` as normal first. If it opens the Store instead of running Python, that's an "App execution alias" stub — Python isn't really installed (or isn't on PATH). Install Python from [python.org](https://www.python.org/downloads/) (check **"Add python.exe to PATH"**) or `winget install Python.Python.3.12`. If `python` still opens the Store afterward, fall back to the `py` launcher: `py --version`, `py -m venv raven-app`. To disable the stub: **Settings → Apps → Advanced app settings → App execution aliases**.
+
+2. **PowerShell blocks `activate`.** Activating the venv (`raven-app\Scripts\activate`) can fail with "running scripts is disabled on this system" because of the default execution policy. Three options:
+   - Allow local scripts once: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`
+   - Use `cmd` instead: `raven-app\Scripts\activate.bat`
+   - **Skip activation entirely** and call the venv's Python by path (most robust — no activation needed):
+     ```
+     raven-app\Scripts\python.exe -m pip install -e .
+     raven-app\Scripts\python.exe main.py
+     ```
+
+3. **`simpleaudio` isn't needed on Windows.** The optional `[audio-simulator]` extra installs `simpleaudio` only on macOS/Linux (it needs a C++ compiler and has no Windows wheels). On Windows the framework automatically uses the built-in `winsound` fallback, so simulator audio works with a plain `pip install -e .` — no extra needed.
+
+4. **Long-path (260-char) install errors.** If `pip install` fails with `OSError ... No such file or directory` on a deeply nested `PySide6\...` path, Windows' 260-character path limit is the cause — most likely when the project lives in a deep folder (OneDrive, a nested workspace, etc.). Fix by either cloning into a short path like `C:\raven-framework`, or enabling long paths permanently (run PowerShell **as Administrator**):
+   ```
+   Set-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" LongPathsEnabled 1
+   ```
+   Then re-run the install.
+
 ### Simulator Behavior
 
 When running in simulator mode:
