@@ -1088,29 +1088,25 @@ class SimulatorRunApp(QMainWindow):
         tip = QFrame(self)
         tip.setWindowFlags(Qt.ToolTip | Qt.FramelessWindowHint)
         tip.setAttribute(Qt.WA_TranslucentBackground, True)
-        tip.setStyleSheet(
-            """
+        tip.setStyleSheet("""
             QFrame {
                 background-color: rgba(30, 30, 30, 0.85);
                 border: 1px solid rgba(255, 255, 255, 0.18);
                 border-radius: 12px;
             }
-        """
-        )
+        """)
         tip_label = QLabel(tip)
         tip_label.setWordWrap(True)
         tip_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         tip_label.setText(RAW_MODE_TOOLTIP_TEXT)
-        tip_label.setStyleSheet(
-            """
+        tip_label.setStyleSheet("""
             QLabel {
                 color: rgba(255, 255, 255, 0.92);
                 font-size: 14px;
                 line-height: 1.35;
                 padding: 18px 12px;
             }
-        """
-        )
+        """)
         tip_label.setMinimumWidth(260)
         tip_label.setMaximumWidth(320)
         tip_layout = QVBoxLayout(tip)
