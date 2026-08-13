@@ -20,9 +20,8 @@ from typing import Any
 
 from .button import Button
 from .container import Container
-from .expanding_icon import ExpandingIcon
 from .horizontal_container import HorizontalContainer
-from .icon import Icon
+from .icon import ExpandingIcon, Icon, RevealIcon
 from .scroll_view import ScrollView
 from .spacer import Spacer
 from .text_box import TextBox
@@ -54,6 +53,7 @@ __all__ = [
     "Icon",
     "MediaViewer",
     "ModelViewer",
+    "RevealIcon",
     "ScrollView",
     "Spacer",
     "TextBox",

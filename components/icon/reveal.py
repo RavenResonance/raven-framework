@@ -11,22 +11,18 @@
 # ================================================================
 
 """
-Icon widget for Raven Framework.
+Reveal icon widget for Raven Framework.
 
-This module provides a customizable icon widget with dwell-to-click
-functionality in two styles, selected with the ``type`` parameter:
+``RevealIcon`` is the launch-treatment sibling of the classic ``Icon``
+(see ``icon.py`` in this package): hover grows the icon and reveals a halo
+sampled from the image's rim colors, a slow breath pulse acts as the dwell
+timer, and dwell completion expands the icon in place — optionally sweeping
+a fullscreen blackout from the icon center that reveals whatever the click
+triggers (the treatment used by the Canopy app launcher and the RavenApp
+home button).
 
-- ``"simple"`` (default): the classic behavior — hover scales the icon up and
-  a visible progress indicator (arc for circles, perimeter trace for rounded
-  rects) fills over ``dwell_time`` before the click fires.
-- ``"pulse"``: hover grows the icon and reveals a halo, a slow breath pulse
-  acts as the dwell timer, and dwell completion expands the icon in place
-  (optionally sweeping a fullscreen blackout from the icon center — the
-  launch treatment used by the Canopy app launcher and the RavenApp home
-  button).
-
-Both styles support circular and rounded-rectangular shapes, background
-images, center text, and optional bottom text.
+Supports circular and rounded-rectangular shapes, background images, center
+text, and optional bottom text, like the classic ``Icon``.
 """
 
 # Standard library imports
@@ -43,7 +39,6 @@ from PySide6.QtCore import (
     QPoint,
     QPointF,
     QPropertyAnimation,
-    QRectF,
     QSequentialAnimationGroup,
     Qt,
     QTimer,
@@ -66,52 +61,44 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QWidget
 
 # Local imports
-from ..helpers.animation_utils import (
+from ...helpers.animation_utils import (
     RavenCurveLike,
     configure_property_animation,
     make_pause_animation,
     make_property_animation,
     resolve_curve,
 )
-from ..helpers.font_utils import create_font
-from ..helpers.logger import get_logger
-from ..helpers.themes import RAVEN_CORE
-from ..helpers.utils_light import load_config, to_qcolor
+from ...helpers.font_utils import create_font
+from ...helpers.logger import get_logger
+from ...helpers.themes import RAVEN_CORE
+from ...helpers.utils_light import load_config, to_qcolor
 
 theme = RAVEN_CORE
 
-log = get_logger("Icon")
+log = get_logger("RevealIcon")
 
 # Load configuration
 _config = load_config()
 _icon_cfg = _config["icon"]
 _pulse_cfg = _config["animation"]["app_launch_icon"]
 
-# Icon types
-ICON_TYPE_PULSE = "pulse"
-ICON_TYPE_SIMPLE = "simple"
-
 # Constants
 DEFAULT_ICON_SIZE = _icon_cfg["DEFAULT_ICON_SIZE"]
 DEFAULT_EXTRA_WIDTH = _icon_cfg["DEFAULT_EXTRA_WIDTH"]
-DEFAULT_EXTRA_HEIGHT = _icon_cfg["DEFAULT_EXTRA_HEIGHT"]
 LABEL_FONT_SIZE_OFFSET = _icon_cfg["LABEL_FONT_SIZE_OFFSET"]
 SQUARE_CORNER_RADIUS_RATIO = _icon_cfg["SQUARE_CORNER_RADIUS_RATIO"]
 SCALE_THRESHOLD = _icon_cfg["SCALE_THRESHOLD"]
 DEFAULT_MAX_WORD_LEN = _icon_cfg["DEFAULT_MAX_WORD_LEN"]
 DEFAULT_BOTTOM_TEXT_SPACING = _icon_cfg["DEFAULT_BOTTOM_TEXT_SPACING"]
-QT_DEGREES_TO_UNITS = _config["display"]["QT_DEGREES_TO_UNITS"]
-MAX_PROGRESS = 100.0  # Maximum progress value for dwell-click (percentage)
-ICON_FPS = _config["fps"]["UI_FPS"]
 
-# Layout constants (pulse type only). Grid tuning (row spacing, margins) is
+# Layout constants. Grid tuning (row spacing, margins) is
 # NOT defined here — it belongs to the screen laying out the grid (e.g.
 # Canopy's launcher config); the grid_* statics take those as arguments.
 LABEL_ROW_BASE_PADDING = 20
 NO_LABEL_ROW_EXTRA = 10
 BLACKOUT_RADIUS_EPSILON = 1.0
 MIN_BLACKOUT_START_RADIUS = 1.0
-# How long a generic (non-launch) pulse icon stays hidden after a dwell click
+# How long a generic (non-launch) reveal icon stays hidden after a dwell click
 # before fading back in at rest and accepting hovers again.
 DEFAULT_REARM_DELAY_MS = 1000
 
@@ -231,21 +218,20 @@ class LaunchBlackoutOverlay(QWidget):
             painter.drawEllipse(self._origin, self._radius, self._radius)
 
 
-class Icon(QWidget):
+class RevealIcon(QWidget):
     """
     A customizable UI widget that displays a circular or rounded-rect icon with
-    dwell-click interaction, background image, scaling animation, and optional
+    breath-pulse dwell interaction, background image, halo, and optional
     center/bottom text.
 
-    Two interaction styles are available via ``type``:
+    Hover grows the icon and shows a halo sampled from the image's rim colors;
+    a slow breath pulse acts as the dwell timer, and dwell completion expands
+    the icon in place before emitting ``clicked``. When ``overlay_parent`` is
+    provided, a fullscreen blackout sweeps from the icon center first,
+    revealing whatever the click triggers (app-launch treatment).
 
-    - ``"simple"`` (default): hover scales the icon up, then a visible
-      progress indicator fills over ``dwell_time`` before ``clicked`` fires.
-    - ``"pulse"``: hover grows the icon and shows a halo sampled from the
-      image's rim colors; a slow breath pulse acts as the dwell timer, and
-      dwell completion expands the icon in place before emitting ``clicked``.
-      When ``overlay_parent`` is provided, a fullscreen blackout sweeps from
-      the icon center first (app-launch treatment).
+    For the classic hover-scale + progress-arc dwell icon, use ``Icon`` from
+    this package instead.
 
     Signals:
         clicked: Emitted when the icon is clicked or dwell-clicked.
@@ -259,27 +245,20 @@ class Icon(QWidget):
         text_color (str): Color of the center text as string. Defaults to theme.fonts.body.color.
         font (str): Font family (e.g. 'inter'). Defaults to theme.fonts.body.family.
         font_weight (str): Font weight, one of 'light', 'normal', 'medium', 'bold', or 'black'. Defaults to theme.fonts.body.weight.
-        corner_radius (Optional[int]): Corner curvature for rounded-rect mode. Defaults to
-            theme.borders.corner_radius for type="simple" and size * SQUARE_CORNER_RADIUS_RATIO for type="pulse".
+        corner_radius (Optional[int]): Corner curvature for rounded-rect mode.
+            Defaults to size * SQUARE_CORNER_RADIUS_RATIO.
         outline_width (int): Width of the circular/rectangular outline stroke. Defaults to theme.borders.highlight_width + 2.
         outline_color (str): Color of the circular/rectangular outline stroke as string. Defaults to theme.borders.highlight_color_icon.
-        scale_by (Optional[float]): Scaling offset used for hover animation (e.g., 0.1 for 10%).
-            Defaults to 0.08 for type="simple" (shrinks at rest); for type="pulse" it sets the hover
-            peak scale to 1 + scale_by (config HOVER_GROW_TO_SCALE when omitted).
-        scale_step (float): Increment step of scaling per frame (simple only). Defaults to 0.01.
-        fps (int): Frames per second for animation timers (simple only).
-        delay_time (int): Delay in ms before dwell progress starts (simple only). Defaults to 500.
-        dwell_time (int): Time in ms required to trigger a click on hover (simple only). Defaults to 1500.
-        background_outline_color (str): Outline color shown on hover (simple rounded rect) as string. Defaults to theme.basic_palette.gray.
+        scale_by (Optional[float]): Sets the hover peak scale to 1 + scale_by
+            (config HOVER_GROW_TO_SCALE when omitted).
         is_square (bool): Whether to use a rounded rectangle (True) or circle (False). Defaults to False.
         enable_click (bool): Whether to allow dwell-based clicking. Defaults to True.
         bottom_text (str): Optional text displayed below the icon. Defaults to "".
         bottom_text_spacing (Optional[int]): Vertical spacing in pixels between the icon and bottom text.
-            Defaults to 0 for type="simple" and 13 for type="pulse".
+            Defaults to 13 (config DEFAULT_BOTTOM_TEXT_SPACING).
         disabled (bool): If True, icon is disabled and won't respond to clicks or hover. Defaults to False.
-        type (str): Interaction style — "simple" (default, classic progress-arc dwell) or "pulse".
 
-    Pulse-type args (all defaults come from config ``animation.app_launch_icon``):
+    Dwell/launch args (all defaults come from config ``animation.app_launch_icon``):
         pulse_count (int): Number of breath pulses in the dwell sequence.
         base_scale / pulse_dip_scale / pulse_peak_scale / expand_max_scale (float): Scale keyframes.
         hover_grow_ms / hover_hold_ms / breath_dip_ms / breath_return_ms / final_dip_ms /
@@ -304,7 +283,7 @@ class Icon(QWidget):
     clicked = Signal()
 
     # ------------------------------------------------------------------
-    # Grid layout helpers (pulse type; used by the Canopy launcher)
+    # Grid layout helpers (used by the Canopy launcher)
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -313,7 +292,7 @@ class Icon(QWidget):
 
     @staticmethod
     def layout_row_height(size: int, show_names: bool, label_spacing: int = 0) -> int:
-        return Icon.layout_content_height(size, show_names, label_spacing)
+        return RevealIcon.layout_content_height(size, show_names, label_spacing)
 
     @staticmethod
     def scale_overflow_pad(
@@ -381,18 +360,12 @@ class Icon(QWidget):
         outline_width: int = theme.borders.highlight_width + 2,
         outline_color: str = theme.borders.highlight_color_icon,
         scale_by: Optional[float] = None,
-        scale_step: float = 0.01,
-        fps: int = ICON_FPS,
-        delay_time: int = 500,
-        dwell_time: int = 1500,
-        background_outline_color: str = theme.basic_palette.gray,
         is_square: bool = False,
         enable_click: bool = True,
         bottom_text: str = "",
         bottom_text_spacing: Optional[int] = None,
         disabled: bool = False,
-        type: str = ICON_TYPE_SIMPLE,
-        # ------- pulse-type parameters -------
+        # ------- dwell/launch parameters -------
         pulse_count: int = DEFAULT_PULSE_COUNT,
         base_scale: float = DEFAULT_BASE_SCALE,
         pulse_dip_scale: float = DEFAULT_PULSE_DIP_SCALE,
@@ -439,19 +412,12 @@ class Icon(QWidget):
         **_: Any,
     ) -> None:
         """
-        Initialize the Icon widget.
+        Initialize the RevealIcon widget.
 
         See class docstring for parameter descriptions.
         """
         super().__init__()
 
-        if type not in (ICON_TYPE_PULSE, ICON_TYPE_SIMPLE):
-            error_msg = f"Invalid icon type: {type!r} (expected 'pulse' or 'simple')"
-            log.error(error_msg, extra={"console": True})
-            raise ValueError(error_msg)
-        self.icon_type: str = type
-
-        # ------- Attributes shared by both types -------
         self.is_square: bool = is_square
         self.size: int = int(size)
         self.full_diameter: int = self.size
@@ -467,37 +433,15 @@ class Icon(QWidget):
         self.background_color: QColor = self.color
         self.outline_width: int = int(outline_width)
         self.outline_color: QColor = to_qcolor(outline_color)
-        self.outline_color_bg: QColor = to_qcolor(background_outline_color)
         self.bottom_text: str = bottom_text
         self.bottom_text_visible: bool = bool(bottom_text)
 
-        if self.icon_type == ICON_TYPE_SIMPLE:
-            self.corner_radius: float = (
-                float(corner_radius)
-                if corner_radius is not None
-                else float(theme.borders.corner_radius)
-            )
-            self.bottom_text_spacing: int = int(
-                bottom_text_spacing if bottom_text_spacing is not None else 0
-            )
-            self.scale_pad: int = 0
-            self._init_simple(
-                background_image_path=background_image_path,
-                scale_by=scale_by if scale_by is not None else 0.08,
-                scale_step=scale_step,
-                fps=fps,
-                delay_time=delay_time,
-                dwell_time=dwell_time,
-            )
-            return
-
-        # ------- Pulse type -------
-        self.corner_radius = (
+        self.corner_radius: float = (
             float(corner_radius)
             if corner_radius is not None
             else self.size * SQUARE_CORNER_RADIUS_RATIO
         )
-        self.bottom_text_spacing = int(
+        self.bottom_text_spacing: int = int(
             bottom_text_spacing
             if bottom_text_spacing is not None
             else DEFAULT_BOTTOM_TEXT_SPACING
@@ -672,88 +616,8 @@ class Icon(QWidget):
         self._reset_morph_anim = QPropertyAnimation(self, b"morph")
         self._reset_halo_scale_anim = QPropertyAnimation(self, b"halo_scale")
 
-    # ------------------------------------------------------------------
-    # Simple-type initialization (classic timer-driven dwell)
-    # ------------------------------------------------------------------
-
-    def _init_simple(
-        self,
-        background_image_path: Optional[str],
-        scale_by: float,
-        scale_step: float,
-        fps: int,
-        delay_time: int,
-        dwell_time: int,
-    ) -> None:
-        self.delay_time = delay_time
-
-        # Image loading
-        try:
-            self.bg_image: Optional[QPixmap] = (
-                QPixmap(background_image_path) if background_image_path else None
-            )
-        except Exception as e:
-            self.bg_image = None
-            log.error(f"Error loading background image: {e}")
-
-        # Scaling properties
-        self.start_at_scale: float = 1.0 - scale_by
-        self._scale = self.start_at_scale
-        self.target_scale: float = self.start_at_scale
-        self.scale_step: float = scale_step
-
-        # Set fixed size considering optional bottom text height
-        extra_height = DEFAULT_EXTRA_HEIGHT if self.bottom_text else 0
-        extra_width = DEFAULT_EXTRA_WIDTH if self.bottom_text else 0
-        self.setFixedSize(self.size + extra_width, self.size + extra_height)
-
-        # Timing and progress
-        self.fps: int = int(fps)
-        if self.fps == 0:
-            error_msg = "Division by zero: fps is 0, cannot calculate timer interval"
-            log.error(error_msg, extra={"console": True})
-            raise ValueError(error_msg)
-        self.progress: float = 0.0
-        self.max_progress: float = MAX_PROGRESS
-        if fps > 0 and dwell_time > 0:
-            self.progress_increment: float = self.max_progress / (
-                dwell_time / (1000.0 / fps)
-            )
-        else:
-            log.warning("Invalid fps or dwell_time, setting progress_increment to 1.0")
-            self.progress_increment = 1.0
-
-        self.delay_progress = 0.0
-        self.max_delay_progress = MAX_PROGRESS
-
-        if fps > 0 and self.delay_time > 0:
-            self.delay_progress_increment = self.max_delay_progress / (
-                self.delay_time / (1000.0 / self.fps)
-            )
-        else:
-            log.warning(
-                "Invalid fps or delay_time, setting delay_progress_increment to 1.0"
-            )
-            self.delay_progress_increment = 1.0
-
-        # Timers
-        timer_interval = int(1000 / self.fps)
-        self.delay_timer = QTimer(self)
-        self.delay_timer.setInterval(timer_interval)
-        self.delay_timer.timeout.connect(self.update_delay_progress)
-
-        self.progress_timer = QTimer(self)
-        self.progress_timer.setInterval(timer_interval)
-        self.progress_timer.timeout.connect(self.update_progress)
-
-        self.scale_timer = QTimer(self)
-        self.scale_timer.setInterval(timer_interval)
-        self.scale_timer.timeout.connect(self.animate_scale)
-
-        self.setMouseTracking(True)
-
     def _load_pulse_pixmap(self, background_image_path: Optional[str]) -> None:
-        """Load and pre-scale the icon image for pulse-type painting."""
+        """Load and pre-scale the icon image for painting."""
         self._pixmap = None
         self.bg_image = None
         if not background_image_path:
@@ -775,44 +639,14 @@ class Icon(QWidget):
         )
 
     # ------------------------------------------------------------------
-    # Qt event handlers (dispatch on icon type)
+    # Qt event handlers
     # ------------------------------------------------------------------
-
-    def closeEvent(self, event: QEvent) -> None:
-        """
-        Clean up animation timers and resources when the widget is closed.
-
-        Args:
-            event: Close event from Qt.
-        """
-        try:
-            log.debug("Icon closing - cleaning up timers")
-
-            # Stop all timers (simple type only; pulse animations are parented)
-            if hasattr(self, "delay_timer") and self.delay_timer.isActive():
-                self.delay_timer.stop()
-                self.delay_timer.deleteLater()
-
-            if hasattr(self, "progress_timer") and self.progress_timer.isActive():
-                self.progress_timer.stop()
-                self.progress_timer.deleteLater()
-
-            if hasattr(self, "scale_timer") and self.scale_timer.isActive():
-                self.scale_timer.stop()
-                self.scale_timer.deleteLater()
-
-            log.debug("Icon timers cleaned up")
-        except Exception as e:
-            log.error(f"Error cleaning up icon timers: {e}", exc_info=True)
-
-        super().closeEvent(event)
 
     def enterEvent(self, event: QEnterEvent) -> None:
         """
         Handle mouse enter event.
 
-        Starts the hover animation: scale-up (simple) or the pulse dwell
-        sequence (pulse).
+        Starts the hover grow and the breath-pulse dwell sequence.
 
         Args:
             event: Mouse enter event from Qt.
@@ -821,19 +655,12 @@ class Icon(QWidget):
             super().enterEvent(event)
             return
 
-        if self.icon_type == ICON_TYPE_PULSE:
-            if self._dwell_launched or not self.enable_click:
-                super().enterEvent(event)
-                return
-            self._stop_all_animations()
-            self._reset_expand_state()
-            self._hover_sequence.start()
+        if self._dwell_launched or not self.enable_click:
             super().enterEvent(event)
             return
-
-        self.target_scale = 1.0
-        if not self.scale_timer.isActive():
-            self.scale_timer.start()
+        self._stop_all_animations()
+        self._reset_expand_state()
+        self._hover_sequence.start()
         super().enterEvent(event)
 
     def leaveEvent(self, event: QEvent) -> None:
@@ -849,27 +676,14 @@ class Icon(QWidget):
             super().leaveEvent(event)
             return
 
-        if self.icon_type == ICON_TYPE_PULSE:
-            if self._dwell_launched or not self.enable_click:
-                super().leaveEvent(event)
-                return
-            self._stop_all_animations()
-            if self._expanding:
-                self._animate_reset_to_base(self._reset_expand_state)
-            else:
-                self._animate_reset_to_base()
+        if self._dwell_launched or not self.enable_click:
             super().leaveEvent(event)
             return
-
-        self.bottom_text_visible = True
-        self.target_scale = self.start_at_scale
-        self.progress_timer.stop()
-        self.progress = 0.0
-        self.delay_timer.stop()
-        self.delay_progress = 0.0
-        self.update()
-        if not self.scale_timer.isActive():
-            self.scale_timer.start()
+        self._stop_all_animations()
+        if self._expanding:
+            self._animate_reset_to_base(self._reset_expand_state)
+        else:
+            self._animate_reset_to_base()
         super().leaveEvent(event)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
@@ -886,87 +700,13 @@ class Icon(QWidget):
             super().mousePressEvent(event)
             return
 
-        if self.icon_type == ICON_TYPE_PULSE:
-            if self.enable_click and event.button() == Qt.LeftButton:
-                self._stop_all_animations()
-                self.clicked.emit()
-            super().mousePressEvent(event)
-            return
-
         if self.enable_click and event.button() == Qt.LeftButton:
-            self.progress = 0.0
-            self.progress_timer.stop()
-            self.bottom_text_visible = False
+            self._stop_all_animations()
             self.clicked.emit()
-            self.update()
         super().mousePressEvent(event)
 
     # ------------------------------------------------------------------
-    # Simple-type animation (timer-driven)
-    # ------------------------------------------------------------------
-
-    def animate_scale(self) -> None:
-        """
-        Handle hover scaling animation logic (simple type).
-
-        Called on scale_timer timeout. Smoothly animates the icon scale towards
-        the target scale. When scale reaches 1.0 and mouse is over the icon,
-        starts delay timer or progress timer.
-        """
-        if self.disabled:
-            return
-        if abs(self._scale - self.target_scale) < SCALE_THRESHOLD:
-            self._scale = self.target_scale
-            self.scale_timer.stop()
-            if self._scale == 1.0 and self.underMouse():
-                self.delay_progress = 0.0
-                if self.delay_time > 0:
-                    self.delay_timer.start()
-                else:
-                    self.progress_timer.start()
-        else:
-            direction = 1 if self.target_scale > self._scale else -1
-            self._scale += direction * self.scale_step
-        self.update()
-
-    def update_delay_progress(self) -> None:
-        """
-        Run delay countdown before dwell progress starts (simple type).
-
-        Called on delay_timer timeout. When delay completes and mouse is still
-        over the icon, starts the progress timer for dwell-click functionality.
-        """
-        if self.disabled:
-            return
-        self.delay_progress += self.delay_progress_increment
-        if self.delay_progress >= self.max_delay_progress:
-            self.delay_timer.stop()
-            self.delay_progress = 0.0
-            if self.underMouse():
-                self.progress_timer.start()
-        self.update()
-
-    def update_progress(self) -> None:
-        """
-        Increment dwell progress and emit clicked signal once threshold reached
-        (simple type).
-
-        Called on progress_timer timeout. When progress reaches maximum,
-        triggers dwell click and hides bottom text.
-        """
-        if self.disabled or not self.enable_click:
-            return
-        self.progress += self.progress_increment
-        if self.progress >= self.max_progress:
-            log.info("Dwell click triggered.")
-            self.progress_timer.stop()
-            self.bottom_text_visible = False
-            self.progress = 0.0
-            self.clicked.emit()
-        self.update()
-
-    # ------------------------------------------------------------------
-    # Pulse-type animation (property-animation driven)
+    # Dwell animation (property-animation driven)
     # ------------------------------------------------------------------
 
     def _build_hover_sequence(self) -> QSequentialAnimationGroup:
@@ -1251,8 +991,7 @@ class Icon(QWidget):
     def set_scale(self, value: float) -> None:
         self._scale = float(value)
         if (
-            self.icon_type == ICON_TYPE_PULSE
-            and not self._dwell_launched  # never climb above the blackout
+            not self._dwell_launched  # never climb above the blackout
             and value > self.base_scale + SCALE_THRESHOLD
         ):
             self.raise_()
@@ -1286,34 +1025,16 @@ class Icon(QWidget):
         """
         Paint the icon widget.
 
-        Handles rendering of the icon background, halo/outline, progress
-        indicator, center text, and optional bottom text.
+        Handles rendering of the icon background, halo/outline, center text,
+        and optional bottom text.
 
         Args:
             event: Paint event from Qt.
         """
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-
-        if self.icon_type == ICON_TYPE_PULSE:
-            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-            self._paint_pulse(painter)
-            return
-
-        if self.disabled:
-            painter.setOpacity(0.5)
-
-        if self.is_square:
-            self._paint_rounded_rect(painter)
-        else:
-            self._paint_circle(painter)
-
-        self.paint_center_text(painter)
-        if self.bottom_text and self.bottom_text_visible:
-            self.paint_bottom_text(painter)
-
-        if self.disabled:
-            painter.setOpacity(1.0)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        self._paint_pulse(painter)
 
     def _paint_pulse(self, painter: QPainter) -> None:
         if self.disabled:
@@ -1369,141 +1090,6 @@ class Icon(QWidget):
             processed_text,
         )
 
-    def paint_bottom_text(self, painter: QPainter) -> None:
-        """
-        Draw wrapped text below the icon with hyphenation (simple type).
-
-        Args:
-            painter: QPainter instance for drawing.
-        """
-        if not self.bottom_text:
-            return
-
-        painter.setClipping(False)
-        painter.setPen(self.text_color)
-        font = create_font(
-            self.font,
-            max(self.text_size - LABEL_FONT_SIZE_OFFSET, 1),
-            self.font_weight,
-        )
-        painter.setFont(font)
-
-        # Hyphenate before wrapping
-        processed_text = self.wrap_with_hyphenation(
-            self.bottom_text, max_word_len=DEFAULT_MAX_WORD_LEN
-        )
-
-        y_offset = self.size + self.bottom_text_spacing
-        text_rect = QRectF(0, y_offset, self.width(), self.height() - y_offset)
-
-        painter.drawText(
-            text_rect, Qt.TextWordWrap | Qt.AlignHCenter | Qt.AlignTop, processed_text
-        )
-
-    def _paint_rounded_rect(self, painter: QPainter) -> None:
-        """
-        Paint a rounded rectangle icon with optional image and progress
-        (simple type).
-
-        Args:
-            painter: QPainter instance for drawing.
-        """
-        w = self.size * self._scale
-        h = self.size * self._scale
-        radius = self.corner_radius
-
-        x = (self.width() - w) / 2
-        y = 0 if self.bottom_text else (self.height() - h) / 2
-        rect = QRectF(x, y, w, h)
-
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(self.color)
-        painter.drawRoundedRect(rect, radius, radius)
-
-        path = QPainterPath()
-        path.addRoundedRect(rect, radius, radius)
-        painter.setClipPath(path)
-
-        if self.bg_image:
-            image = self.bg_image.scaled(
-                int(w), int(h), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation
-            )
-            painter.drawPixmap(int(x), int(y), image)
-
-        if (
-            self.enable_click and self.delay_progress == self.max_delay_progress
-        ) or not self.enable_click:
-            painter.setPen(QPen(self.outline_color_bg, self.outline_width))
-            painter.setBrush(Qt.NoBrush)
-            painter.drawRoundedRect(rect, radius, radius)
-
-        if self.progress > 0:
-            self.draw_quad_progress(painter, rect, radius)
-
-    def _paint_circle(self, painter: QPainter) -> None:
-        """
-        Paint a circular icon with optional image and progress arc
-        (simple type).
-
-        Args:
-            painter: QPainter instance for drawing.
-        """
-        diameter = self.size * self._scale
-        x = (self.width() - diameter) / 2
-        y = 0 if self.bottom_text else (self.height() - diameter) / 2
-        rect = QRectF(x, y, diameter, diameter)
-
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(self.color)
-        painter.drawEllipse(rect)
-
-        path = QPainterPath()
-        path.addEllipse(rect)
-        painter.setClipPath(path)
-
-        if self.bg_image:
-            image = self.bg_image.scaled(
-                int(diameter),
-                int(diameter),
-                Qt.KeepAspectRatioByExpanding,
-                Qt.SmoothTransformation,
-            )
-            painter.drawPixmap(int(x), int(y), image)
-
-        if self.progress > 0:
-            pen = QPen(self.outline_color, self.outline_width)
-            painter.setPen(pen)
-            angle_span = int((self.progress / MAX_PROGRESS) * 360 * QT_DEGREES_TO_UNITS)
-            painter.drawArc(rect, 90 * QT_DEGREES_TO_UNITS, -angle_span)
-
-        if not self.enable_click:
-            pen = QPen(self.outline_color, self.outline_width)
-            painter.setPen(pen)
-            angle_span = int(360 * QT_DEGREES_TO_UNITS)
-            painter.drawArc(rect, 90 * QT_DEGREES_TO_UNITS, -angle_span)
-
-    def paint_center_text(self, painter: QPainter) -> None:
-        """
-        Paint the center text of the icon (simple type).
-
-        Args:
-            painter: QPainter instance for drawing.
-        """
-        painter.setClipping(False)
-        painter.setPen(self.text_color)
-        font = create_font(self.font, self.text_size, self.font_weight)
-        painter.setFont(font)
-
-        fm = QFontMetrics(font)
-        text_width = fm.horizontalAdvance(self.text)
-        text_height = fm.height()
-
-        painter.drawText(
-            int((self.width() - text_width) / 2),
-            int((self.height() + text_height) / 2 - fm.descent()),
-            self.text,
-        )
-
     def _paint_pulse_center_text(self, painter: QPainter) -> None:
         """Paint the center text at the icon center (pulse type). The painter
         is already translated to the icon center and scaled, so the text
@@ -1521,120 +1107,15 @@ class Icon(QWidget):
             self.text,
         )
 
-    def draw_quad_progress(
-        self, painter: QPainter, rect: QRectF, corner_radius: float
-    ) -> None:
-        """
-        Draw progress path around the rounded rectangle (simple type).
-
-        Progress follows the rectangle perimeter clockwise starting from top-left corner.
-
-        Args:
-            painter: QPainter instance for drawing.
-            rect: Rectangle bounding box for the icon.
-            corner_radius: Radius for rounded corners.
-        """
-        painter.setPen(QPen(self.outline_color, self.outline_width))
-
-        top_len = rect.width() - 2 * corner_radius
-        side_len = rect.height() - 2 * corner_radius
-        arc_len = (math.pi / 2) * corner_radius
-        side_top_bottom = top_len + arc_len
-        side_left_right = side_len + arc_len
-        ratio = self.progress / MAX_PROGRESS
-
-        # Top side
-        top_prog = side_top_bottom * ratio
-        x_start = rect.left() + corner_radius
-        y_top = rect.top()
-        if top_prog <= top_len:
-            painter.drawLine(x_start, y_top, x_start + top_prog, y_top)
-        else:
-            painter.drawLine(x_start, y_top, x_start + top_len, y_top)
-            arc_prog = min(top_prog - top_len, arc_len)
-            arc_rect = QRectF(
-                rect.right() - 2 * corner_radius,
-                rect.top(),
-                2 * corner_radius,
-                2 * corner_radius,
-            )
-            painter.drawArc(
-                arc_rect,
-                90 * QT_DEGREES_TO_UNITS,
-                -arc_prog / arc_len * 90 * QT_DEGREES_TO_UNITS,
-            )
-
-        # Right side
-        right_prog = side_left_right * ratio
-        x_right = rect.right()
-        y_start = rect.top() + corner_radius
-        if right_prog <= side_len:
-            painter.drawLine(x_right, y_start, x_right, y_start + right_prog)
-        else:
-            painter.drawLine(x_right, y_start, x_right, y_start + side_len)
-            arc_prog = min(right_prog - side_len, arc_len)
-            arc_rect = QRectF(
-                rect.right() - 2 * corner_radius,
-                rect.bottom() - 2 * corner_radius,
-                2 * corner_radius,
-                2 * corner_radius,
-            )
-            painter.drawArc(arc_rect, 0, -arc_prog / arc_len * 90 * QT_DEGREES_TO_UNITS)
-
-        # Bottom side
-        bottom_prog = side_top_bottom * ratio
-        y_bottom = rect.bottom()
-        x_start = rect.right() - corner_radius
-        if bottom_prog <= top_len:
-            painter.drawLine(x_start, y_bottom, x_start - bottom_prog, y_bottom)
-        else:
-            painter.drawLine(x_start, y_bottom, x_start - top_len, y_bottom)
-            arc_prog = min(bottom_prog - top_len, arc_len)
-            arc_rect = QRectF(
-                rect.left(),
-                rect.bottom() - 2 * corner_radius,
-                2 * corner_radius,
-                2 * corner_radius,
-            )
-            painter.drawArc(
-                arc_rect,
-                270 * QT_DEGREES_TO_UNITS,
-                -arc_prog / arc_len * 90 * QT_DEGREES_TO_UNITS,
-            )
-
-        # Left side
-        left_prog = side_left_right * ratio
-        x_left = rect.left()
-        y_start = rect.bottom() - corner_radius
-        if left_prog <= side_len:
-            painter.drawLine(x_left, y_start, x_left, y_start - left_prog)
-        else:
-            painter.drawLine(x_left, y_start, x_left, y_start - side_len)
-            arc_prog = min(left_prog - side_len, arc_len)
-            arc_rect = QRectF(
-                rect.left(), rect.top(), 2 * corner_radius, 2 * corner_radius
-            )
-            painter.drawArc(
-                arc_rect,
-                180 * QT_DEGREES_TO_UNITS,
-                -arc_prog / arc_len * 90 * QT_DEGREES_TO_UNITS,
-            )
-
     # ------------------------------------------------------------------
-    # Pulse-type painting internals
+    # Painting internals
     # ------------------------------------------------------------------
 
     def _icon_center_x(self) -> float:
-        if self.icon_type == ICON_TYPE_SIMPLE:
-            return self.width() / 2
         extra_width = DEFAULT_EXTRA_WIDTH if self.bottom_text else 0
         return self._scale_pad + (self.size + extra_width) / 2
 
     def _icon_center_y(self) -> float:
-        if self.icon_type == ICON_TYPE_SIMPLE:
-            if self.bottom_text:
-                return self.size / 2
-            return self.height() / 2
         if self.bottom_text:
             return self._scale_pad + self.size / 2
         return self._scale_pad + (self.height() - self._scale_pad) / 2
@@ -1796,18 +1277,8 @@ class Icon(QWidget):
                                      Pass None to remove the image.
         """
         try:
-            if self.icon_type == ICON_TYPE_PULSE:
-                self._load_pulse_pixmap(image_path)
-                self._halo_border_gradient = self._build_halo_border_gradient()
-                self.update()
-                return
-            if image_path:
-                self.bg_image = QPixmap(image_path)
-                if self.bg_image.isNull():
-                    log.warning(f"Failed to load image: {image_path}")
-                    self.bg_image = None
-            else:
-                self.bg_image = None
+            self._load_pulse_pixmap(image_path)
+            self._halo_border_gradient = self._build_halo_border_gradient()
             self.update()
         except Exception as e:
             log.error(f"Error setting background image: {e}")
@@ -1850,26 +1321,19 @@ class Icon(QWidget):
             self.setEnabled(True)
             return
 
-        if self.icon_type == ICON_TYPE_PULSE:
-            self._stop_all_animations()
-            if self._blackout_overlay is not None:
-                self._blackout_overlay.deleteLater()
-                self._blackout_overlay = None
-            self._reset_expand_state()
-            if self._overlay_parent is None:
-                # Clear the post-dwell latch (and un-hide) so a generic icon
-                # isn't stuck black or gone when re-enabled.
-                self._rearm_timer.stop()
-                if self._hidden_for_rearm:
-                    self.show()
-                self._hidden_for_rearm = False
-                self._dwell_launched = False
-        else:
-            self.progress_timer.stop()
-            self.delay_timer.stop()
-            self.progress = 0.0
-            self.delay_progress = 0.0
-            self.update()
+        self._stop_all_animations()
+        if self._blackout_overlay is not None:
+            self._blackout_overlay.deleteLater()
+            self._blackout_overlay = None
+        self._reset_expand_state()
+        if self._overlay_parent is None:
+            # Clear the post-dwell latch (and un-hide) so a generic icon
+            # isn't stuck black or gone when re-enabled.
+            self._rearm_timer.stop()
+            if self._hidden_for_rearm:
+                self.show()
+            self._hidden_for_rearm = False
+            self._dwell_launched = False
         self.setEnabled(False)
 
     def set_disabled(self, disabled: bool) -> None:
@@ -1887,30 +1351,15 @@ class Icon(QWidget):
 
         self.disabled = disabled
 
-        if self.icon_type == ICON_TYPE_PULSE:
-            if disabled:
-                self._stop_all_animations()
-                self._reset_expand_state()
-                if self._overlay_parent is None:
-                    self._rearm_timer.stop()
-                    if self._hidden_for_rearm:
-                        self.show()
-                    self._hidden_for_rearm = False
-                    self._dwell_launched = False
-            self.update()
-            return
-
-        # Stop any active timers when disabling
         if disabled:
-            self.progress_timer.stop()
-            self.delay_timer.stop()
-            self.progress = 0.0
-            self.delay_progress = 0.0
-            # Reset to start scale when disabled
-            self.target_scale = self.start_at_scale
-            if not self.scale_timer.isActive():
-                self.scale_timer.start()
-
+            self._stop_all_animations()
+            self._reset_expand_state()
+            if self._overlay_parent is None:
+                self._rearm_timer.stop()
+                if self._hidden_for_rearm:
+                    self.show()
+                self._hidden_for_rearm = False
+                self._dwell_launched = False
         self.update()
 
     def set_enabled(self, enabled: bool) -> None:

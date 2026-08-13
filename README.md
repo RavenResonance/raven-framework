@@ -448,7 +448,38 @@ def on_icon_click(self, new_text):
 
 **Frequently used methods:** `set_text(new_text: str)`, `on_clicked(callback, *args, **kwargs)`, `set_background_image(image_path: str)`, `set_disabled(disabled: bool)`, `set_enabled(enabled: bool)`, `is_disabled() -> bool`
 
-See detailed params and functions in `raven_framework/components/icon.py`
+See detailed params and functions in `raven_framework/components/icon/icon.py`
+
+#### RevealIcon
+
+The launch-treatment sibling of `Icon`. Hovering grows the icon and reveals a halo sampled from the image's rim colors; a slow breath pulse acts as the dwell timer, and dwell completion expands the icon in place before `clicked` fires. When `overlay_parent` is provided, a fullscreen blackout sweeps from the icon center first — the treatment used by the app launcher and the RavenApp home button.
+
+```python
+from raven_framework.components.icon import RevealIcon
+```
+
+Reveal icon with breath-pulse dwell:
+```python
+icon = RevealIcon(background_image_path="icon.png")
+icon.on_clicked(self.on_icon_click)
+```
+
+App-launch treatment (blackout sweeps the parent before `clicked` fires):
+```python
+icon = RevealIcon(
+    background_image_path="icon.png",
+    overlay_parent=self.main_container,
+    screen_width=1920,
+    screen_height=1080,
+)
+icon.on_clicked(self.launch_app, app_id)
+```
+
+**Frequently used params:** the shared `Icon` params (`background_image_path`, `size`, `background_color`, `center_text`, `is_square`, `enable_click`, `bottom_text`, `disabled`) plus dwell/launch tuning from config `animation.app_launch_icon`: `pulse_count`, per-phase `*_ms` durations and `*_curve` easings, `halo_*` tuning, `overlay_parent`, `screen_width`/`screen_height`, `blackout_ms`, `blackout_hold_ms`
+
+**Frequently used methods:** same surface as `Icon`, plus `circle_bounds_in_widget()` for positioning by the visible circle (the widget is padded for scale overflow)
+
+See detailed params and functions in `raven_framework/components/icon/reveal.py`
 
 #### Spacer
 

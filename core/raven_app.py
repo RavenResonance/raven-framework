@@ -26,7 +26,7 @@ from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import QApplication, QWidget
 
 from ..components.container import Container
-from ..components.icon import Icon
+from ..components.icon import RevealIcon
 from ..components.text_box import TextBox
 from ..helpers.animation_utils import fade_in, fade_out, resolve_curve
 from ..helpers.logger import get_logger
@@ -128,24 +128,23 @@ class RavenApp(Container):
         )
 
         close_icon_size = 80
-        # Pulse home button: the dwell expands it to black and sweeps the
+        # Reveal home button: the dwell expands it to black and sweeps the
         # launch blackout across the entire app before on_home_clicked fires.
         # The blackout then holds full-black long enough for the app's exit
         # fade to play out hidden behind it — a dwell exit cuts straight to
         # black, while a plain click (no expand/blackout) keeps the visible
         # exit fade.
-        self.close_icon = Icon(
+        self.close_icon = RevealIcon(
             is_square=False,
             background_image_path=home_icon_path,
             size=close_icon_size,
-            type="pulse",
             overlay_parent=self,
             screen_width=RAVEN_APP_WIDTH,
             screen_height=RAVEN_APP_HEIGHT,
             blackout_hold_ms=HOME_BLACKOUT_HOLD_MS,
         )
         self.close_icon.on_clicked(self.on_home_clicked)
-        # Pulse-type icons pad their widget for scale overflow; offset by the
+        # Reveal icons pad their widget for scale overflow; offset by the
         # circle's position inside the widget so the visible icon lands where
         # the unpadded icon used to.
         icon_left, icon_top, _, _ = self.close_icon.circle_bounds_in_widget()
