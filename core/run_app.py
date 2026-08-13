@@ -171,12 +171,19 @@ def run(
         if not device_handoff:
             window.show()
             window.move(0, 0)
+            window.activateWindow()
         log.info("Application started.")
 
         def _show_and_reveal() -> None:
             if device_handoff:
                 window.show()
                 window.move(0, 0)
+                # Explicit activation — a newly-mapped frameless/borderless
+                # window isn't guaranteed to receive compositor focus just
+                # by being shown, and without it no child widget (including
+                # RavenApp's own keyPressEvent) will ever see key events.
+                window.activateWindow()
+                app_widget.setFocus()
             if hasattr(window, "reveal"):
                 window.reveal(APP_REVEAL_MS)
 
@@ -268,6 +275,10 @@ class RunApp(QMainWindow):
 
             self.setCentralWidget(container)
             set_custom_circle_cursor(app_widget)
+            # Re-assert focus now that app_widget is actually embedded in
+            # this window's layout — a focus request made before reparenting
+            # (e.g. in RavenApp.__init__) isn't guaranteed to survive it.
+            app_widget.setFocus()
 
             log.info("RunApp initialized successfully.")
         except Exception as e:

@@ -22,6 +22,7 @@ import sys
 from typing import Optional
 
 from PySide6.QtCore import QDateTime, Qt, QTimer
+from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import QApplication, QWidget
 
 from ..components.container import Container
@@ -176,6 +177,12 @@ class RavenApp(Container):
             self._timer.timeout.connect(self.update_time)
             self._timer.start(TIME_UPDATE_INTERVAL_MS)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        # Explicitly request focus rather than relying on Qt/the compositor
+        # to hand it to us automatically on window activation — StrongFocus
+        # alone doesn't guarantee that, especially once this widget is
+        # reparented into RunApp's layout (see RunApp.__init__, which
+        # re-asserts this after embedding).
+        self.setFocus()
 
         self.app_id = ""
         self.is_awake = True
@@ -187,6 +194,24 @@ class RavenApp(Container):
         self._fade_curve = resolve_curve(_wake_cfg["FADE_CURVE"])
         self._wake_brightness_gain = _wake_cfg["WAKE_BRIGHTNESS_GAIN"]
         self._sleep_brightness_gain = _wake_cfg["SLEEP_BRIGHTNESS_GAIN"]
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        """Enter/Return exits the app via the same path as the close icon.
+
+        Framework-level so any RavenApp-based dev app gets an exit key for
+        free, without the app author needing to wire up their own key
+        handling or call bind_sleep_wake().
+
+        Logs every key (not just Enter/Return) — if this widget isn't
+        actually receiving keyboard focus, nothing here fires at all, so an
+        unconditional log is what lets that be diagnosed from the console
+        output rather than assumed.
+        """
+        log.info("RavenApp keyPressEvent: key=%s", event.key(), extra={"console": True})
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            log.info("Enter pressed — exiting app", extra={"console": True})
+            self.on_home_clicked()
+        super().keyPressEvent(event)
 
     def bind_sleep_wake(self, app_id: str = "", app_key: str = "") -> None:
         """Wire double-click (Enter in simulator) to fade the UI in and out."""
