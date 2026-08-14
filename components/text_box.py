@@ -106,12 +106,10 @@ class TextBox(QLabel):
                     font_weight = theme_font.weight
 
             self.setAttribute(Qt.WA_TranslucentBackground, True)
-            self.setStyleSheet(
-                f"""
+            self.setStyleSheet(f"""
                 color: {css_color(text_color)};
                 background-color: transparent;
-            """
-            )
+            """)
 
             font_obj = create_font(font, font_size, font_weight)
             self.setFont(font_obj)

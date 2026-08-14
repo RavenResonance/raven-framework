@@ -18,7 +18,7 @@ Reveal icon widget for Raven Framework.
 sampled from the image's rim colors, a slow breath pulse acts as the dwell
 timer, and dwell completion expands the icon in place — optionally sweeping
 a fullscreen blackout from the icon center that reveals whatever the click
-triggers (the treatment used by the Canopy app launcher and the RavenApp
+triggers (the treatment used by the system app launcher and the RavenApp
 home button).
 
 Supports circular and rounded-rectangular shapes, background images, center
@@ -80,7 +80,7 @@ log = get_logger("RevealIcon")
 # Load configuration
 _config = load_config()
 _icon_cfg = _config["icon"]
-_pulse_cfg = _config["animation"]["app_launch_icon"]
+_pulse_cfg = _config["animation"]["reveal_icon"]
 
 # Constants
 DEFAULT_ICON_SIZE = _icon_cfg["DEFAULT_ICON_SIZE"]
@@ -93,7 +93,7 @@ DEFAULT_BOTTOM_TEXT_SPACING = _icon_cfg["DEFAULT_BOTTOM_TEXT_SPACING"]
 
 # Layout constants. Grid tuning (row spacing, margins) is
 # NOT defined here — it belongs to the screen laying out the grid (e.g.
-# Canopy's launcher config); the grid_* statics take those as arguments.
+# the launcher's config); the grid_* statics take those as arguments.
 LABEL_ROW_BASE_PADDING = 20
 NO_LABEL_ROW_EXTRA = 10
 BLACKOUT_RADIUS_EPSILON = 1.0
@@ -258,7 +258,7 @@ class RevealIcon(QWidget):
             Defaults to 13 (config DEFAULT_BOTTOM_TEXT_SPACING).
         disabled (bool): If True, icon is disabled and won't respond to clicks or hover. Defaults to False.
 
-    Dwell/launch args (all defaults come from config ``animation.app_launch_icon``):
+    Dwell/launch args (all defaults come from config ``animation.reveal_icon``):
         pulse_count (int): Number of breath pulses in the dwell sequence.
         base_scale / pulse_dip_scale / pulse_peak_scale / expand_max_scale (float): Scale keyframes.
         hover_grow_ms / hover_hold_ms / breath_dip_ms / breath_return_ms / final_dip_ms /
@@ -283,7 +283,7 @@ class RevealIcon(QWidget):
     clicked = Signal()
 
     # ------------------------------------------------------------------
-    # Grid layout helpers (used by the Canopy launcher)
+    # Grid layout helpers (used by the system app launcher)
     # ------------------------------------------------------------------
 
     @staticmethod

@@ -179,7 +179,7 @@ class RavenApp(Container):
         # Explicitly request focus rather than relying on Qt/the compositor
         # to hand it to us automatically on window activation — StrongFocus
         # alone doesn't guarantee that, especially once this widget is
-        # reparented into RunApp's layout (see RunApp.__init__, which
+        # rechilded into RunApp's layout (see RunApp.__init__, which
         # re-asserts this after embedding).
         self.setFocus()
 

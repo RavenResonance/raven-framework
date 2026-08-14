@@ -100,7 +100,7 @@
       "APP_EXIT_FADE_MS": 1000,
       "HOME_BLACKOUT_HOLD_MS": 2000
     },
-    "app_launch_icon": {
+    "reveal_icon": {
       "HOVER_GROW_FROM_SCALE": 1.0,
       "HOVER_GROW_TO_SCALE": 1.08,
       "PULSE_DIP_SCALE": 0.85,

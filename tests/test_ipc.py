@@ -18,6 +18,7 @@ import tempfile
 from unittest.mock import patch
 
 import pytest
+
 import raven_framework.ipc as ipc_pkg
 from raven_framework.ipc import app_launch
 from raven_framework.ipc.app_launch import (
