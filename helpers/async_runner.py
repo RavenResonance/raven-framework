@@ -144,7 +144,7 @@ class AsyncRunner:
             runner.run(process_data, on_complete=update_ui)
             ```
         """
-        # Parented to self.threadpool (a QObject, stable for this AsyncRunner's
+        # Childed to self.threadpool (a QObject, stable for this AsyncRunner's
         # whole lifetime) rather than left parentless. A parentless QObject's
         # C++-side destruction timing is governed entirely by Python's GC,
         # which can run at any point -- including while Qt still has this
