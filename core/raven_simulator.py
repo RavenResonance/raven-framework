@@ -40,6 +40,7 @@ from ..helpers.animation_utils import fade_in, fade_out
 from ..helpers.logger import get_logger
 from ..helpers.utils import qpixmap_to_rgb_bytes
 from ..helpers.utils_light import load_config, set_custom_circle_cursor
+from . import head_pose
 from .waveguide_halo import HaloSettings, apply_waveguide_halo
 
 log = get_logger("RunApp")
@@ -63,7 +64,7 @@ OVERLAY_BACKGROUND_VIDEO_OUTDOORS_PATH = _config["simulator"][
 ]
 DEFAULT_OVERLAY_BRIGHTNESS = _config["simulator"]["DEFAULT_OVERLAY_BRIGHTNESS"]
 APP_WINDOW_RESOLUTION = (DISPLAY_RESOLUTION[0], DISPLAY_RESOLUTION[1])
-CLIENT_DEVICE_ADDITIONAL_WINDOW_HEIGHT = 116
+CLIENT_DEVICE_ADDITIONAL_WINDOW_HEIGHT = 174
 RAW_MODE_TOOLTIP_TEXT = _config["simulator"]["RAW_MODE_TOOLTIP_TEXT"]
 PRINT_SIMULATOR_PERFORMANCE = _config["simulator"]["PRINT_SIMULATOR_PERFORMANCE"]
 SIMULATOR_CALIBRATION_FILENAME = _config["simulator"]["SIMULATOR_CALIBRATION_FILENAME"]
@@ -433,6 +434,11 @@ class SimulatorBackgroundWidget(QWidget):
         self.video_capture = None
         self.background_path = None
 
+        # Head movement. Off by default, so the simulator behaves exactly as
+        # it always has until the wearer turns it on.
+        self.head_motion_enabled = False
+        self._panorama = head_pose.PanoramaRenderer()
+
         self.setFixedSize(self.resolution[0], self.resolution[1])
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
@@ -471,13 +477,26 @@ class SimulatorBackgroundWidget(QWidget):
         log.info("SimulatorBackgroundWidget initialized successfully.")
 
     def fit_frame(self, frame, width: int, height: int):
-        """Scale one decoded frame to cover the display and crop the overflow.
+        """Fit one decoded frame to the display.
 
-        The camera and video paths in ``_BackgroundWorker`` each carried a
-        byte-for-byte copy of this. It lives here now so there is one
-        implementation to reason about; the output is unchanged.
+        Normally that means scaling it to cover and cropping the overflow,
+        which is what the camera and video paths each used to do for
+        themselves. With head movement on, the frame is instead taken as
+        the view straight ahead, and the wearer's pose decides which part
+        of the surrounding scene is in front of them.
+
+        A failure here falls back to the flat frame rather than dropping
+        it: a scene that stops updating looks like a hung simulator.
         """
         import cv2
+
+        if self.head_motion_enabled:
+            try:
+                return self._panorama.render(
+                    frame, head_pose.tracker().pose(), width, height
+                )
+            except Exception as e:
+                log.debug(f"Head pose render failed, showing the flat frame: {e}")
 
         source_height, source_width = frame.shape[:2]
         if source_width / source_height > width / height:
@@ -908,8 +927,86 @@ class SimulatorRunApp(QMainWindow):
             halo_container.setFixedHeight(58)
             layout.addWidget(halo_container)
 
+            # Head movement. Raven Prism reads head motion from its IMU, so
+            # on the glasses the scene slides past while the HUD stays put.
+            # These controls put that behaviour in the simulator.
+            head_container = QWidget(container)
+            head_layout = QHBoxLayout(head_container)
+            head_layout.setContentsMargins(10, 4, 10, 6)
+            head_layout.setSpacing(6)
+
+            # Built here, on the main thread, because the tracker's timer
+            # belongs to whichever thread creates it.
+            self._head_tracker = head_pose.tracker()
+
+            self._head_toggle = QPushButton("3D: Off", head_container)
+            self._head_toggle.setCheckable(True)
+            self._head_toggle.setFixedSize(88, 36)
+            self._head_toggle.setStyleSheet(
+                self._mode_buttons_glass.replace(
+                    "padding: 6px 14px", "padding: 4px 6px"
+                )
+            )
+            self._head_toggle.toggled.connect(self._on_head_motion_toggled)
+            head_layout.addWidget(self._head_toggle)
+
+            self._head_hint = QLabel("WASD to look around")
+            self._head_hint.setFixedWidth(126)
+            head_layout.addWidget(self._head_hint)
+
+            self._head_fov_label = QLabel("View 42°")
+            self._head_fov_label.setFixedWidth(62)
+            head_layout.addWidget(self._head_fov_label)
+            self._head_fov = QSlider(Qt.Orientation.Horizontal, head_container)
+            self._head_fov.setRange(
+                int(head_pose.VIEW_FOV_RANGE[0]), int(head_pose.VIEW_FOV_RANGE[1])
+            )
+            self._head_fov.setValue(int(head_pose.DEFAULT_VIEW_FOV))
+            self._head_fov.setFixedWidth(60)
+            self._head_fov.valueChanged.connect(self._on_head_controls_changed)
+            head_layout.addWidget(self._head_fov)
+
+            self._head_speed_label = QLabel("Speed 1.0x")
+            self._head_speed_label.setFixedWidth(66)
+            head_layout.addWidget(self._head_speed_label)
+            self._head_speed = QSlider(Qt.Orientation.Horizontal, head_container)
+            self._head_speed.setRange(25, 300)
+            self._head_speed.setValue(100)
+            self._head_speed.setFixedWidth(60)
+            self._head_speed.valueChanged.connect(self._on_head_controls_changed)
+            head_layout.addWidget(self._head_speed)
+
+            self._head_readout = QLabel("centred")
+            self._head_readout.setFixedWidth(104)
+            head_layout.addWidget(self._head_readout)
+
+            self._head_recentre = QPushButton("Recentre", head_container)
+            self._head_recentre.setFixedSize(80, 36)
+            self._head_recentre.setStyleSheet(
+                self._mode_buttons_glass.replace(
+                    "padding: 6px 14px", "padding: 4px 6px"
+                )
+            )
+            self._head_recentre.clicked.connect(self._recentre_head)
+            head_layout.addWidget(self._head_recentre)
+            head_layout.addStretch()
+
+            for label in head_container.findChildren(QLabel):
+                label.setStyleSheet("color: rgba(255,255,255,0.88); font-size: 12px;")
+
+            head_container.setFixedHeight(58)
+            layout.addWidget(head_container)
+
+            # The readout follows the pose, which moves on its own timer
+            # rather than on key events, so it has to be polled.
+            self._head_readout_timer = QTimer(self)
+            self._head_readout_timer.setInterval(100)
+            self._head_readout_timer.timeout.connect(self._update_head_readout)
+            self._head_readout_timer.start()
+
             self._update_mode_button_styles()
             self._on_halo_controls_changed()
+            self._on_head_controls_changed()
 
             self.setCentralWidget(container)
             set_custom_circle_cursor(self._app_widget)
@@ -1247,6 +1344,47 @@ class SimulatorRunApp(QMainWindow):
         self._halo_secondary_strength.setValue(round(defaults.secondary_strength * 100))
         self._halo_secondary_radius.setValue(defaults.secondary_radius)
         self._on_halo_controls_changed()
+
+    def _on_head_motion_toggled(self, checked: bool) -> None:
+        enabled = bool(checked)
+        self._head_tracker.set_enabled(enabled)
+        self._head_toggle.setText("3D: On" if enabled else "3D: Off")
+        self._head_toggle.setStyleSheet(
+            self._mode_buttons_active if enabled else self._mode_buttons_glass
+        )
+        if self.background_widget is not None:
+            self.background_widget.head_motion_enabled = enabled
+        if not enabled:
+            # Leaving the mode should leave the scene where it started, not
+            # frozen at whatever angle the wearer happened to stop at.
+            self._head_tracker.recentre()
+        self._update_head_readout()
+
+    def _on_head_controls_changed(self, *_args) -> None:
+        field_of_view = self._head_fov.value()
+        self._head_fov_label.setText(f"View {field_of_view}°")
+        if self.background_widget is not None:
+            self.background_widget._panorama.set_view_fov(float(field_of_view))
+
+        speed = self._head_speed.value() / 100.0
+        self._head_speed_label.setText(f"Speed {speed:.1f}x")
+        self._head_tracker.sensitivity = speed
+
+    def _recentre_head(self) -> None:
+        self._head_tracker.recentre()
+        self._update_head_readout()
+
+    def _update_head_readout(self) -> None:
+        if not self._head_tracker.enabled:
+            self._head_readout.setText("off")
+            return
+        pose = self._head_tracker.pose()
+        if pose.is_centred():
+            self._head_readout.setText("centred")
+        else:
+            self._head_readout.setText(
+                f"yaw {pose.yaw:+.0f}°   pitch {pose.pitch:+.0f}°"
+            )
 
     def _update_mode_button_styles(self) -> None:
         if not hasattr(self, "_mode_buttons"):
