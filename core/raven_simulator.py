@@ -375,29 +375,7 @@ class _BackgroundWorker(QObject):
                     ret, background = cam.read()
                     if not ret or background is None:
                         continue
-                    cam_height, cam_width = background.shape[:2]
-                    target_aspect = w / h
-                    cam_aspect = cam_width / cam_height
-                    if cam_aspect > target_aspect:
-                        new_height = h
-                        new_width = int(cam_width * (h / cam_height))
-                        background = cv2.resize(
-                            background,
-                            (new_width, new_height),
-                            interpolation=cv2.INTER_LINEAR,
-                        )
-                        crop_x = (new_width - w) // 2
-                        background = background[:, crop_x : crop_x + w]
-                    else:
-                        new_width = w
-                        new_height = int(cam_height * (w / cam_width))
-                        background = cv2.resize(
-                            background,
-                            (new_width, new_height),
-                            interpolation=cv2.INTER_LINEAR,
-                        )
-                        crop_y = (new_height - h) // 2
-                        background = background[crop_y : crop_y + h, :]
+                    background = self._widget.fit_frame(background, w, h)
                 elif (
                     preset
                     in [
@@ -414,29 +392,7 @@ class _BackgroundWorker(QObject):
                         ret, background = vid.read()
                         if not ret or background is None:
                             continue
-                    video_height, video_width = background.shape[:2]
-                    target_aspect = w / h
-                    video_aspect = video_width / video_height
-                    if video_aspect > target_aspect:
-                        new_height = h
-                        new_width = int(video_width * (h / video_height))
-                        background = cv2.resize(
-                            background,
-                            (new_width, new_height),
-                            interpolation=cv2.INTER_LINEAR,
-                        )
-                        crop_x = (new_width - w) // 2
-                        background = background[:, crop_x : crop_x + w]
-                    else:
-                        new_width = w
-                        new_height = int(video_height * (w / video_width))
-                        background = cv2.resize(
-                            background,
-                            (new_width, new_height),
-                            interpolation=cv2.INTER_LINEAR,
-                        )
-                        crop_y = (new_height - h) // 2
-                        background = background[crop_y : crop_y + h, :]
+                    background = self._widget.fit_frame(background, w, h)
                 elif path is not None and os.path.exists(path):
                     background = cv2.imread(path)
                     if background is not None:
@@ -513,6 +469,30 @@ class SimulatorBackgroundWidget(QWidget):
                     log.warning("Failed to open background simulator video")
 
         log.info("SimulatorBackgroundWidget initialized successfully.")
+
+    def fit_frame(self, frame, width: int, height: int):
+        """Scale one decoded frame to cover the display and crop the overflow.
+
+        The camera and video paths in ``_BackgroundWorker`` each carried a
+        byte-for-byte copy of this. It lives here now so there is one
+        implementation to reason about; the output is unchanged.
+        """
+        import cv2
+
+        source_height, source_width = frame.shape[:2]
+        if source_width / source_height > width / height:
+            scaled_height = height
+            scaled_width = int(source_width * (height / source_height))
+        else:
+            scaled_width = width
+            scaled_height = int(source_height * (width / source_width))
+
+        frame = cv2.resize(
+            frame, (scaled_width, scaled_height), interpolation=cv2.INTER_LINEAR
+        )
+        left = (scaled_width - width) // 2
+        top = (scaled_height - height) // 2
+        return frame[top : top + height, left : left + width]
 
     def _on_background_frame(self, rgb_bytes: object, w: int, h: int) -> None:
         """Main-thread slot: set background label pixmap from worker."""
