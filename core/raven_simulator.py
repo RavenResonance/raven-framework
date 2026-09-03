@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QPushButton,
+    QSlider,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -39,6 +40,7 @@ from ..helpers.animation_utils import fade_in, fade_out
 from ..helpers.logger import get_logger
 from ..helpers.utils import qpixmap_to_rgb_bytes
 from ..helpers.utils_light import load_config, set_custom_circle_cursor
+from .waveguide_halo import HaloSettings, apply_waveguide_halo
 
 log = get_logger("RunApp")
 _config = load_config()
@@ -61,7 +63,7 @@ OVERLAY_BACKGROUND_VIDEO_OUTDOORS_PATH = _config["simulator"][
 ]
 DEFAULT_OVERLAY_BRIGHTNESS = _config["simulator"]["DEFAULT_OVERLAY_BRIGHTNESS"]
 APP_WINDOW_RESOLUTION = (DISPLAY_RESOLUTION[0], DISPLAY_RESOLUTION[1])
-CLIENT_DEVICE_ADDITIONAL_WINDOW_HEIGHT = 60
+CLIENT_DEVICE_ADDITIONAL_WINDOW_HEIGHT = 116
 RAW_MODE_TOOLTIP_TEXT = _config["simulator"]["RAW_MODE_TOOLTIP_TEXT"]
 PRINT_SIMULATOR_PERFORMANCE = _config["simulator"]["PRINT_SIMULATOR_PERFORMANCE"]
 SIMULATOR_CALIBRATION_FILENAME = _config["simulator"]["SIMULATOR_CALIBRATION_FILENAME"]
@@ -154,7 +156,7 @@ _LUT_D_3D_LINEAR = _build_lut_d_3d_linear()
 _LUT_OUT_3D = _build_lut_out_3d()
 
 
-def blend_frame(bg_bgr, snapshot_bgr):
+def blend_frame(bg_bgr, snapshot_bgr, halo_settings=None):
     """Linear suppress blend: bg_bgr and snapshot_bgr (BGR uint8, same shape). Returns blended BGR uint8."""
     # -------------------------------------------------------------------------
     # FULL PIPELINE MATH
@@ -239,12 +241,21 @@ def blend_frame(bg_bgr, snapshot_bgr):
     bi = cv2.LUT(bg_bgr, _LUT_SRGB_TO_LIN_BYTE)
     si = cv2.LUT(snapshot_bgr, _LUT_SRGB_TO_LIN_BYTE)
 
+    # Raven's current calibrated PSF remains untouched and disabled by default.
+    # The optional halo below is a separate perceptual approximation: sharp HUD
+    # core + broad low-energy light leak, applied in linear-light byte space.
+    use_linear_demand = False
     if CONSIDER_POINT_SPREAD:
-        # Step 2 & 3
         si = cv2.filter2D(si, -1, POINT_SPREAD_KERNEL)
+        use_linear_demand = True
+
+    if halo_settings is not None and halo_settings.enabled:
+        si = apply_waveguide_halo(si, halo_settings)
+        use_linear_demand = True
+
+    if use_linear_demand:
         d = _LUT_D_3D_LINEAR[si[:, :, 0], si[:, :, 1], si[:, :, 2]]
     else:
-        # Step 3
         d = _LUT_D_3D[
             snapshot_bgr[:, :, 0],
             snapshot_bgr[:, :, 1],
@@ -280,7 +291,7 @@ class SimulatorBlendWorker(QObject):
             if item is None:
                 break
             try:
-                app_bytes, w, h, seq, brightness = item
+                app_bytes, w, h, seq, brightness, halo_settings = item
                 snapshot_rgb = np.frombuffer(app_bytes, dtype=np.uint8).reshape(
                     (h, w, 3)
                 )
@@ -307,7 +318,9 @@ class SimulatorBlendWorker(QObject):
                 if USE_SIMPLE_ADDITIVE_BLEND:
                     blended = cv2.add(bg_bgr, snapshot_bgr)
                 else:
-                    blended = blend_frame(bg_bgr, snapshot_bgr)
+                    blended = blend_frame(
+                        bg_bgr, snapshot_bgr, halo_settings=halo_settings
+                    )
                 blended_rgb = np.ascontiguousarray(
                     cv2.cvtColor(blended, cv2.COLOR_BGR2RGB)
                 )
@@ -760,6 +773,7 @@ class SimulatorRunApp(QMainWindow):
             self._timing_report_timer.start(3000)
 
             self._raw_mode = False
+            self._halo_settings = HaloSettings()
             self._app_ui_asleep = False
             self._raw_update_timer = QTimer(self)
             self._raw_update_timer.timeout.connect(self._update_raw_composite)
@@ -842,7 +856,80 @@ class SimulatorRunApp(QMainWindow):
             button_container.setFixedHeight(58)
             layout.addWidget(button_container)
 
+            # Simulator-only waveguide halo controls. This is intentionally
+            # separate from Raven's existing PSF, which remains disabled.
+            #
+            # Every slider carries its own value, because the four ranges
+            # differ (0-40, 2-40, 0-20, 20-100) and a tuning control you
+            # cannot read a number off is one you cannot report a setting
+            # from.
+            halo_container = QWidget(container)
+            halo_layout = QHBoxLayout(halo_container)
+            halo_layout.setContentsMargins(10, 4, 10, 6)
+            halo_layout.setSpacing(4)
+
+            self._halo_toggle = QPushButton("Halo: Off", halo_container)
+            self._halo_toggle.setCheckable(True)
+            self._halo_toggle.setFixedSize(88, 36)
+            self._halo_toggle.setStyleSheet(
+                self._mode_buttons_glass.replace(
+                    "padding: 6px 14px", "padding: 4px 6px"
+                )
+            )
+            self._halo_toggle.toggled.connect(self._on_halo_controls_changed)
+            halo_layout.addWidget(self._halo_toggle)
+
+            def _slider(low, high, value, width):
+                s = QSlider(Qt.Orientation.Horizontal, halo_container)
+                s.setRange(low, high)
+                s.setValue(value)
+                s.setFixedWidth(width)
+                s.valueChanged.connect(self._on_halo_controls_changed)
+                return s
+
+            self._halo_glow_label = QLabel("Glow 10%")
+            self._halo_glow_label.setFixedWidth(60)
+            halo_layout.addWidget(self._halo_glow_label)
+            self._halo_primary_strength = _slider(0, 40, 10, 50)
+            halo_layout.addWidget(self._halo_primary_strength)
+
+            self._halo_radius_label = QLabel("Radius 8px")
+            self._halo_radius_label.setFixedWidth(76)
+            halo_layout.addWidget(self._halo_radius_label)
+            self._halo_primary_radius = _slider(2, 40, 8, 50)
+            halo_layout.addWidget(self._halo_primary_radius)
+
+            self._halo_wide_label = QLabel("Wide 5%")
+            self._halo_wide_label.setFixedWidth(58)
+            halo_layout.addWidget(self._halo_wide_label)
+            self._halo_secondary_strength = _slider(0, 20, 5, 46)
+            halo_layout.addWidget(self._halo_secondary_strength)
+
+            self._halo_wide_radius_label = QLabel("Wide R 40px")
+            self._halo_wide_radius_label.setFixedWidth(78)
+            halo_layout.addWidget(self._halo_wide_radius_label)
+            self._halo_secondary_radius = _slider(20, 100, 40, 46)
+            halo_layout.addWidget(self._halo_secondary_radius)
+
+            self._halo_reset = QPushButton("Reset", halo_container)
+            self._halo_reset.setFixedSize(72, 36)
+            self._halo_reset.setStyleSheet(
+                self._mode_buttons_glass.replace(
+                    "padding: 6px 14px", "padding: 4px 6px"
+                )
+            )
+            self._halo_reset.clicked.connect(self._reset_halo_controls)
+            halo_layout.addWidget(self._halo_reset)
+            halo_layout.addStretch()
+
+            for label in halo_container.findChildren(QLabel):
+                label.setStyleSheet("color: rgba(255,255,255,0.88); font-size: 12px;")
+
+            halo_container.setFixedHeight(58)
+            layout.addWidget(halo_container)
+
             self._update_mode_button_styles()
+            self._on_halo_controls_changed()
 
             self.setCentralWidget(container)
             set_custom_circle_cursor(self._app_widget)
@@ -967,7 +1054,14 @@ class SimulatorRunApp(QMainWindow):
             self._blend_sequence += 1
             self._last_put_time = time.perf_counter()
             self._blend_queue.put_nowait(
-                (app_bytes, w, h, seq, DEFAULT_OVERLAY_BRIGHTNESS)
+                (
+                    app_bytes,
+                    w,
+                    h,
+                    seq,
+                    DEFAULT_OVERLAY_BRIGHTNESS,
+                    self._halo_settings,
+                )
             )
             self._blend_last_sent = seq
         except queue.Full:
@@ -1134,6 +1228,45 @@ class SimulatorRunApp(QMainWindow):
                 if tip is not None:
                     tip.hide()
         return super().eventFilter(obj, event)
+
+    def _on_halo_controls_changed(self, *_args) -> None:
+        if not hasattr(self, "_halo_toggle"):
+            return
+        self._halo_settings = HaloSettings(
+            enabled=self._halo_toggle.isChecked(),
+            primary_strength=self._halo_primary_strength.value() / 100.0,
+            primary_radius=self._halo_primary_radius.value(),
+            secondary_strength=self._halo_secondary_strength.value() / 100.0,
+            secondary_radius=self._halo_secondary_radius.value(),
+        ).sanitized()
+
+        # Values on the labels, so a setting can be read off and reported.
+        self._halo_glow_label.setText(f"Glow {self._halo_primary_strength.value()}%")
+        self._halo_radius_label.setText(f"Radius {self._halo_primary_radius.value()}px")
+        self._halo_wide_label.setText(f"Wide {self._halo_secondary_strength.value()}%")
+        self._halo_wide_radius_label.setText(
+            f"Wide R {self._halo_secondary_radius.value()}px"
+        )
+
+        self._halo_toggle.setText(
+            "Halo: On" if self._halo_settings.enabled else "Halo: Off"
+        )
+        self._halo_toggle.setStyleSheet(
+            self._mode_buttons_active
+            if self._halo_settings.enabled
+            else self._mode_buttons_glass
+        )
+        if not getattr(self, "_raw_mode", False):
+            QTimer.singleShot(0, self._update_composite)
+
+    def _reset_halo_controls(self) -> None:
+        defaults = HaloSettings()
+        self._halo_toggle.setChecked(defaults.enabled)
+        self._halo_primary_strength.setValue(round(defaults.primary_strength * 100))
+        self._halo_primary_radius.setValue(defaults.primary_radius)
+        self._halo_secondary_strength.setValue(round(defaults.secondary_strength * 100))
+        self._halo_secondary_radius.setValue(defaults.secondary_radius)
+        self._on_halo_controls_changed()
 
     def _update_mode_button_styles(self) -> None:
         if not hasattr(self, "_mode_buttons"):
