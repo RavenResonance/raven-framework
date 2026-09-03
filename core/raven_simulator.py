@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QPushButton,
+    QSlider,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -39,6 +40,8 @@ from ..helpers.animation_utils import fade_in, fade_out
 from ..helpers.logger import get_logger
 from ..helpers.utils import qpixmap_to_rgb_bytes
 from ..helpers.utils_light import load_config, set_custom_circle_cursor
+from . import head_pose
+from .waveguide_halo import HaloSettings, apply_waveguide_halo
 
 log = get_logger("RunApp")
 _config = load_config()
@@ -61,7 +64,7 @@ OVERLAY_BACKGROUND_VIDEO_OUTDOORS_PATH = _config["simulator"][
 ]
 DEFAULT_OVERLAY_BRIGHTNESS = _config["simulator"]["DEFAULT_OVERLAY_BRIGHTNESS"]
 APP_WINDOW_RESOLUTION = (DISPLAY_RESOLUTION[0], DISPLAY_RESOLUTION[1])
-CLIENT_DEVICE_ADDITIONAL_WINDOW_HEIGHT = 60
+CLIENT_DEVICE_ADDITIONAL_WINDOW_HEIGHT = 174
 RAW_MODE_TOOLTIP_TEXT = _config["simulator"]["RAW_MODE_TOOLTIP_TEXT"]
 PRINT_SIMULATOR_PERFORMANCE = _config["simulator"]["PRINT_SIMULATOR_PERFORMANCE"]
 SIMULATOR_CALIBRATION_FILENAME = _config["simulator"]["SIMULATOR_CALIBRATION_FILENAME"]
@@ -154,7 +157,7 @@ _LUT_D_3D_LINEAR = _build_lut_d_3d_linear()
 _LUT_OUT_3D = _build_lut_out_3d()
 
 
-def blend_frame(bg_bgr, snapshot_bgr):
+def blend_frame(bg_bgr, snapshot_bgr, halo_settings=None):
     """Linear suppress blend: bg_bgr and snapshot_bgr (BGR uint8, same shape). Returns blended BGR uint8."""
     # -------------------------------------------------------------------------
     # FULL PIPELINE MATH
@@ -239,12 +242,21 @@ def blend_frame(bg_bgr, snapshot_bgr):
     bi = cv2.LUT(bg_bgr, _LUT_SRGB_TO_LIN_BYTE)
     si = cv2.LUT(snapshot_bgr, _LUT_SRGB_TO_LIN_BYTE)
 
+    # Raven's current calibrated PSF remains untouched and disabled by default.
+    # The optional halo below is a separate perceptual approximation: sharp HUD
+    # core + broad low-energy light leak, applied in linear-light byte space.
+    use_linear_demand = False
     if CONSIDER_POINT_SPREAD:
-        # Step 2 & 3
         si = cv2.filter2D(si, -1, POINT_SPREAD_KERNEL)
+        use_linear_demand = True
+
+    if halo_settings is not None and halo_settings.enabled:
+        si = apply_waveguide_halo(si, halo_settings)
+        use_linear_demand = True
+
+    if use_linear_demand:
         d = _LUT_D_3D_LINEAR[si[:, :, 0], si[:, :, 1], si[:, :, 2]]
     else:
-        # Step 3
         d = _LUT_D_3D[
             snapshot_bgr[:, :, 0],
             snapshot_bgr[:, :, 1],
@@ -280,7 +292,7 @@ class SimulatorBlendWorker(QObject):
             if item is None:
                 break
             try:
-                app_bytes, w, h, seq, brightness = item
+                app_bytes, w, h, seq, brightness, halo_settings = item
                 snapshot_rgb = np.frombuffer(app_bytes, dtype=np.uint8).reshape(
                     (h, w, 3)
                 )
@@ -307,7 +319,9 @@ class SimulatorBlendWorker(QObject):
                 if USE_SIMPLE_ADDITIVE_BLEND:
                     blended = cv2.add(bg_bgr, snapshot_bgr)
                 else:
-                    blended = blend_frame(bg_bgr, snapshot_bgr)
+                    blended = blend_frame(
+                        bg_bgr, snapshot_bgr, halo_settings=halo_settings
+                    )
                 blended_rgb = np.ascontiguousarray(
                     cv2.cvtColor(blended, cv2.COLOR_BGR2RGB)
                 )
@@ -362,29 +376,7 @@ class _BackgroundWorker(QObject):
                     ret, background = cam.read()
                     if not ret or background is None:
                         continue
-                    cam_height, cam_width = background.shape[:2]
-                    target_aspect = w / h
-                    cam_aspect = cam_width / cam_height
-                    if cam_aspect > target_aspect:
-                        new_height = h
-                        new_width = int(cam_width * (h / cam_height))
-                        background = cv2.resize(
-                            background,
-                            (new_width, new_height),
-                            interpolation=cv2.INTER_LINEAR,
-                        )
-                        crop_x = (new_width - w) // 2
-                        background = background[:, crop_x : crop_x + w]
-                    else:
-                        new_width = w
-                        new_height = int(cam_height * (w / cam_width))
-                        background = cv2.resize(
-                            background,
-                            (new_width, new_height),
-                            interpolation=cv2.INTER_LINEAR,
-                        )
-                        crop_y = (new_height - h) // 2
-                        background = background[crop_y : crop_y + h, :]
+                    background = self._widget.fit_frame(background, w, h)
                 elif (
                     preset
                     in [
@@ -401,29 +393,7 @@ class _BackgroundWorker(QObject):
                         ret, background = vid.read()
                         if not ret or background is None:
                             continue
-                    video_height, video_width = background.shape[:2]
-                    target_aspect = w / h
-                    video_aspect = video_width / video_height
-                    if video_aspect > target_aspect:
-                        new_height = h
-                        new_width = int(video_width * (h / video_height))
-                        background = cv2.resize(
-                            background,
-                            (new_width, new_height),
-                            interpolation=cv2.INTER_LINEAR,
-                        )
-                        crop_x = (new_width - w) // 2
-                        background = background[:, crop_x : crop_x + w]
-                    else:
-                        new_width = w
-                        new_height = int(video_height * (w / video_width))
-                        background = cv2.resize(
-                            background,
-                            (new_width, new_height),
-                            interpolation=cv2.INTER_LINEAR,
-                        )
-                        crop_y = (new_height - h) // 2
-                        background = background[crop_y : crop_y + h, :]
+                    background = self._widget.fit_frame(background, w, h)
                 elif path is not None and os.path.exists(path):
                     background = cv2.imread(path)
                     if background is not None:
@@ -464,6 +434,11 @@ class SimulatorBackgroundWidget(QWidget):
         self.video_capture = None
         self.background_path = None
 
+        # Head movement. Off by default, so the simulator behaves exactly as
+        # it always has until the wearer turns it on.
+        self.head_motion_enabled = False
+        self._panorama = head_pose.PanoramaRenderer()
+
         self.setFixedSize(self.resolution[0], self.resolution[1])
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
@@ -500,6 +475,43 @@ class SimulatorBackgroundWidget(QWidget):
                     log.warning("Failed to open background simulator video")
 
         log.info("SimulatorBackgroundWidget initialized successfully.")
+
+    def fit_frame(self, frame, width: int, height: int):
+        """Fit one decoded frame to the display.
+
+        Normally that means scaling it to cover and cropping the overflow,
+        which is what the camera and video paths each used to do for
+        themselves. With head movement on, the frame is instead taken as
+        the view straight ahead, and the wearer's pose decides which part
+        of the surrounding scene is in front of them.
+
+        A failure here falls back to the flat frame rather than dropping
+        it: a scene that stops updating looks like a hung simulator.
+        """
+        import cv2
+
+        if self.head_motion_enabled:
+            try:
+                return self._panorama.render(
+                    frame, head_pose.tracker().pose(), width, height
+                )
+            except Exception as e:
+                log.debug(f"Head pose render failed, showing the flat frame: {e}")
+
+        source_height, source_width = frame.shape[:2]
+        if source_width / source_height > width / height:
+            scaled_height = height
+            scaled_width = int(source_width * (height / source_height))
+        else:
+            scaled_width = width
+            scaled_height = int(source_height * (width / source_width))
+
+        frame = cv2.resize(
+            frame, (scaled_width, scaled_height), interpolation=cv2.INTER_LINEAR
+        )
+        left = (scaled_width - width) // 2
+        top = (scaled_height - height) // 2
+        return frame[top : top + height, left : left + width]
 
     def _on_background_frame(self, rgb_bytes: object, w: int, h: int) -> None:
         """Main-thread slot: set background label pixmap from worker."""
@@ -760,6 +772,7 @@ class SimulatorRunApp(QMainWindow):
             self._timing_report_timer.start(3000)
 
             self._raw_mode = False
+            self._halo_settings = HaloSettings()
             self._app_ui_asleep = False
             self._raw_update_timer = QTimer(self)
             self._raw_update_timer.timeout.connect(self._update_raw_composite)
@@ -842,7 +855,158 @@ class SimulatorRunApp(QMainWindow):
             button_container.setFixedHeight(58)
             layout.addWidget(button_container)
 
+            # Simulator-only waveguide halo controls. This is intentionally
+            # separate from Raven's existing PSF, which remains disabled.
+            #
+            # Every slider carries its own value, because the four ranges
+            # differ (0-40, 2-40, 0-20, 20-100) and a tuning control you
+            # cannot read a number off is one you cannot report a setting
+            # from.
+            halo_container = QWidget(container)
+            halo_layout = QHBoxLayout(halo_container)
+            halo_layout.setContentsMargins(10, 4, 10, 6)
+            halo_layout.setSpacing(4)
+
+            self._halo_toggle = QPushButton("Halo: Off", halo_container)
+            self._halo_toggle.setCheckable(True)
+            self._halo_toggle.setFixedSize(88, 36)
+            self._halo_toggle.setStyleSheet(
+                self._mode_buttons_glass.replace(
+                    "padding: 6px 14px", "padding: 4px 6px"
+                )
+            )
+            self._halo_toggle.toggled.connect(self._on_halo_controls_changed)
+            halo_layout.addWidget(self._halo_toggle)
+
+            def _slider(low, high, value, width):
+                s = QSlider(Qt.Orientation.Horizontal, halo_container)
+                s.setRange(low, high)
+                s.setValue(value)
+                s.setFixedWidth(width)
+                s.valueChanged.connect(self._on_halo_controls_changed)
+                return s
+
+            self._halo_glow_label = QLabel("Glow 10%")
+            self._halo_glow_label.setFixedWidth(60)
+            halo_layout.addWidget(self._halo_glow_label)
+            self._halo_primary_strength = _slider(0, 40, 10, 50)
+            halo_layout.addWidget(self._halo_primary_strength)
+
+            self._halo_radius_label = QLabel("Radius 8px")
+            self._halo_radius_label.setFixedWidth(76)
+            halo_layout.addWidget(self._halo_radius_label)
+            self._halo_primary_radius = _slider(2, 40, 8, 50)
+            halo_layout.addWidget(self._halo_primary_radius)
+
+            self._halo_wide_label = QLabel("Wide 5%")
+            self._halo_wide_label.setFixedWidth(58)
+            halo_layout.addWidget(self._halo_wide_label)
+            self._halo_secondary_strength = _slider(0, 20, 5, 46)
+            halo_layout.addWidget(self._halo_secondary_strength)
+
+            self._halo_wide_radius_label = QLabel("Wide R 40px")
+            self._halo_wide_radius_label.setFixedWidth(78)
+            halo_layout.addWidget(self._halo_wide_radius_label)
+            self._halo_secondary_radius = _slider(20, 100, 40, 46)
+            halo_layout.addWidget(self._halo_secondary_radius)
+
+            self._halo_reset = QPushButton("Reset", halo_container)
+            self._halo_reset.setFixedSize(72, 36)
+            self._halo_reset.setStyleSheet(
+                self._mode_buttons_glass.replace(
+                    "padding: 6px 14px", "padding: 4px 6px"
+                )
+            )
+            self._halo_reset.clicked.connect(self._reset_halo_controls)
+            halo_layout.addWidget(self._halo_reset)
+            halo_layout.addStretch()
+
+            for label in halo_container.findChildren(QLabel):
+                label.setStyleSheet("color: rgba(255,255,255,0.88); font-size: 12px;")
+
+            halo_container.setFixedHeight(58)
+            layout.addWidget(halo_container)
+
+            # Head movement. Raven Prism reads head motion from its IMU, so
+            # on the glasses the scene slides past while the HUD stays put.
+            # These controls put that behaviour in the simulator.
+            head_container = QWidget(container)
+            head_layout = QHBoxLayout(head_container)
+            head_layout.setContentsMargins(10, 4, 10, 6)
+            head_layout.setSpacing(6)
+
+            # Built here, on the main thread, because the tracker's timer
+            # belongs to whichever thread creates it.
+            self._head_tracker = head_pose.tracker()
+
+            self._head_toggle = QPushButton("3D: Off", head_container)
+            self._head_toggle.setCheckable(True)
+            self._head_toggle.setFixedSize(88, 36)
+            self._head_toggle.setStyleSheet(
+                self._mode_buttons_glass.replace(
+                    "padding: 6px 14px", "padding: 4px 6px"
+                )
+            )
+            self._head_toggle.toggled.connect(self._on_head_motion_toggled)
+            head_layout.addWidget(self._head_toggle)
+
+            self._head_hint = QLabel("WASD to look around")
+            self._head_hint.setFixedWidth(126)
+            head_layout.addWidget(self._head_hint)
+
+            self._head_fov_label = QLabel("View 42°")
+            self._head_fov_label.setFixedWidth(62)
+            head_layout.addWidget(self._head_fov_label)
+            self._head_fov = QSlider(Qt.Orientation.Horizontal, head_container)
+            self._head_fov.setRange(
+                int(head_pose.VIEW_FOV_RANGE[0]), int(head_pose.VIEW_FOV_RANGE[1])
+            )
+            self._head_fov.setValue(int(head_pose.DEFAULT_VIEW_FOV))
+            self._head_fov.setFixedWidth(60)
+            self._head_fov.valueChanged.connect(self._on_head_controls_changed)
+            head_layout.addWidget(self._head_fov)
+
+            self._head_speed_label = QLabel("Speed 1.0x")
+            self._head_speed_label.setFixedWidth(66)
+            head_layout.addWidget(self._head_speed_label)
+            self._head_speed = QSlider(Qt.Orientation.Horizontal, head_container)
+            self._head_speed.setRange(25, 300)
+            self._head_speed.setValue(100)
+            self._head_speed.setFixedWidth(60)
+            self._head_speed.valueChanged.connect(self._on_head_controls_changed)
+            head_layout.addWidget(self._head_speed)
+
+            self._head_readout = QLabel("centred")
+            self._head_readout.setFixedWidth(104)
+            head_layout.addWidget(self._head_readout)
+
+            self._head_recentre = QPushButton("Recentre", head_container)
+            self._head_recentre.setFixedSize(80, 36)
+            self._head_recentre.setStyleSheet(
+                self._mode_buttons_glass.replace(
+                    "padding: 6px 14px", "padding: 4px 6px"
+                )
+            )
+            self._head_recentre.clicked.connect(self._recentre_head)
+            head_layout.addWidget(self._head_recentre)
+            head_layout.addStretch()
+
+            for label in head_container.findChildren(QLabel):
+                label.setStyleSheet("color: rgba(255,255,255,0.88); font-size: 12px;")
+
+            head_container.setFixedHeight(58)
+            layout.addWidget(head_container)
+
+            # The readout follows the pose, which moves on its own timer
+            # rather than on key events, so it has to be polled.
+            self._head_readout_timer = QTimer(self)
+            self._head_readout_timer.setInterval(100)
+            self._head_readout_timer.timeout.connect(self._update_head_readout)
+            self._head_readout_timer.start()
+
             self._update_mode_button_styles()
+            self._on_halo_controls_changed()
+            self._on_head_controls_changed()
 
             self.setCentralWidget(container)
             set_custom_circle_cursor(self._app_widget)
@@ -967,7 +1131,14 @@ class SimulatorRunApp(QMainWindow):
             self._blend_sequence += 1
             self._last_put_time = time.perf_counter()
             self._blend_queue.put_nowait(
-                (app_bytes, w, h, seq, DEFAULT_OVERLAY_BRIGHTNESS)
+                (
+                    app_bytes,
+                    w,
+                    h,
+                    seq,
+                    DEFAULT_OVERLAY_BRIGHTNESS,
+                    self._halo_settings,
+                )
             )
             self._blend_last_sent = seq
         except queue.Full:
@@ -1134,6 +1305,86 @@ class SimulatorRunApp(QMainWindow):
                 if tip is not None:
                     tip.hide()
         return super().eventFilter(obj, event)
+
+    def _on_halo_controls_changed(self, *_args) -> None:
+        if not hasattr(self, "_halo_toggle"):
+            return
+        self._halo_settings = HaloSettings(
+            enabled=self._halo_toggle.isChecked(),
+            primary_strength=self._halo_primary_strength.value() / 100.0,
+            primary_radius=self._halo_primary_radius.value(),
+            secondary_strength=self._halo_secondary_strength.value() / 100.0,
+            secondary_radius=self._halo_secondary_radius.value(),
+        ).sanitized()
+
+        # Values on the labels, so a setting can be read off and reported.
+        self._halo_glow_label.setText(f"Glow {self._halo_primary_strength.value()}%")
+        self._halo_radius_label.setText(f"Radius {self._halo_primary_radius.value()}px")
+        self._halo_wide_label.setText(f"Wide {self._halo_secondary_strength.value()}%")
+        self._halo_wide_radius_label.setText(
+            f"Wide R {self._halo_secondary_radius.value()}px"
+        )
+
+        self._halo_toggle.setText(
+            "Halo: On" if self._halo_settings.enabled else "Halo: Off"
+        )
+        self._halo_toggle.setStyleSheet(
+            self._mode_buttons_active
+            if self._halo_settings.enabled
+            else self._mode_buttons_glass
+        )
+        if not getattr(self, "_raw_mode", False):
+            QTimer.singleShot(0, self._update_composite)
+
+    def _reset_halo_controls(self) -> None:
+        defaults = HaloSettings()
+        self._halo_toggle.setChecked(defaults.enabled)
+        self._halo_primary_strength.setValue(round(defaults.primary_strength * 100))
+        self._halo_primary_radius.setValue(defaults.primary_radius)
+        self._halo_secondary_strength.setValue(round(defaults.secondary_strength * 100))
+        self._halo_secondary_radius.setValue(defaults.secondary_radius)
+        self._on_halo_controls_changed()
+
+    def _on_head_motion_toggled(self, checked: bool) -> None:
+        enabled = bool(checked)
+        self._head_tracker.set_enabled(enabled)
+        self._head_toggle.setText("3D: On" if enabled else "3D: Off")
+        self._head_toggle.setStyleSheet(
+            self._mode_buttons_active if enabled else self._mode_buttons_glass
+        )
+        if self.background_widget is not None:
+            self.background_widget.head_motion_enabled = enabled
+        if not enabled:
+            # Leaving the mode should leave the scene where it started, not
+            # frozen at whatever angle the wearer happened to stop at.
+            self._head_tracker.recentre()
+        self._update_head_readout()
+
+    def _on_head_controls_changed(self, *_args) -> None:
+        field_of_view = self._head_fov.value()
+        self._head_fov_label.setText(f"View {field_of_view}°")
+        if self.background_widget is not None:
+            self.background_widget._panorama.set_view_fov(float(field_of_view))
+
+        speed = self._head_speed.value() / 100.0
+        self._head_speed_label.setText(f"Speed {speed:.1f}x")
+        self._head_tracker.sensitivity = speed
+
+    def _recentre_head(self) -> None:
+        self._head_tracker.recentre()
+        self._update_head_readout()
+
+    def _update_head_readout(self) -> None:
+        if not self._head_tracker.enabled:
+            self._head_readout.setText("off")
+            return
+        pose = self._head_tracker.pose()
+        if pose.is_centred():
+            self._head_readout.setText("centred")
+        else:
+            self._head_readout.setText(
+                f"yaw {pose.yaw:+.0f}°   pitch {pose.pitch:+.0f}°"
+            )
 
     def _update_mode_button_styles(self) -> None:
         if not hasattr(self, "_mode_buttons"):
