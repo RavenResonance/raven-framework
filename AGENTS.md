@@ -1626,3 +1626,5 @@ if __name__ == "__main__":
 
 This project is proprietary software. The Raven Framework code and documentation are proprietary and may not be redistributed, modified, or used except as expressly permitted by RavenResonance. Do not push the Raven Framework code to public repositories or distribute it without authorization.
 
+Contributions are welcome under the terms of the [Contributor License Agreement](CLA.md), which must be signed before any Contribution can be accepted.
+
