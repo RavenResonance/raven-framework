@@ -19,6 +19,7 @@ arrow keys can be used to simulate accelerometer readings.
 """
 
 # Standard library imports
+import math
 from typing import Optional
 
 # Third-party imports
@@ -112,13 +113,55 @@ class IMU:
         except Exception as e:
             log.error(f"Error setting up key monitoring: {e}", exc_info=True)
 
+    @staticmethod
+    def _head_pose_reading():
+        """Gravity and turn rate for the simulator's current head pose.
+
+        Returns (accel_y, accel_z, gyro_x, gyro_z), or None when head
+        movement is off -- in which case the reading is left exactly as it
+        was before this existed.
+
+        Tilting the head by a pitch angle swings gravity out of the sensor's
+        z axis and into its y axis, which is what a real accelerometer
+        reports. Yaw does not move gravity at all, so a turn shows up only
+        as rotation on the gyroscope, again as it would on the device.
+        """
+        try:
+            from ..core.head_pose import tracker
+
+            head = tracker()
+            if not head.enabled:
+                return None
+
+            pitch = math.radians(head.pose().pitch)
+            gyro_x = math.radians(head.pitch_rate())
+            gyro_z = math.radians(head.yaw_rate())
+            return (-9.8 * math.sin(pitch), 9.8 * math.cos(pitch), gyro_x, gyro_z)
+        except Exception as e:
+            log.debug(f"IMU: no simulator head pose available ({e})")
+            return None
+
     def _get_simulated_reading(self) -> Optional[dict]:
-        """Get simulated IMU reading based on arrow key presses."""
+        """Get simulated IMU reading based on arrow key presses.
+
+        When the simulator's head movement is switched on, the wearer's
+        pose is folded in as well, so an app reading the IMU sees the same
+        motion the scene is showing. Without this the background would turn
+        while the sensor insisted the head was still. Arrow keys keep
+        working exactly as before, on top of it.
+        """
         try:
             # Z axis defaults to gravity (9.8 m/s² pointing down)
             accel_x = 0.0
             accel_y = 0.0
             accel_z = 9.8
+            gyro_x = 0.0
+            gyro_y = 0.0
+            gyro_z = 0.0
+
+            head = self._head_pose_reading()
+            if head is not None:
+                accel_y, accel_z, gyro_x, gyro_z = head
 
             if _key_states[Qt.Key.Key_Left]:
                 accel_x += SIMULATOR_ACCEL_SCALE
@@ -142,9 +185,9 @@ class IMU:
                     "z": accel_z,
                 },
                 "gyroscope": {
-                    "x": 0.0,
-                    "y": 0.0,
-                    "z": 0.0,
+                    "x": gyro_x,
+                    "y": gyro_y,
+                    "z": gyro_z,
                 },
                 "magnetometer": {
                     "x": 0.0,
