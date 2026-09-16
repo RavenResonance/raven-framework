@@ -101,7 +101,10 @@ class AsyncRunner:
         based on the system's CPU count.
         """
         self.threadpool = QThreadPool()
-        log.info(
+        # DEBUG, not INFO -- callers that construct a fresh AsyncRunner per
+        # call (rather than sharing one) turn this into thousands of
+        # identical lines over a long session.
+        log.debug(
             f"Initialized AsyncRunner with max threads: {self.threadpool.maxThreadCount()}"
         )
 
@@ -160,7 +163,6 @@ class AsyncRunner:
 
         if on_complete:
             emitter.finished.connect(on_complete)
-            log.debug(f"Connected completion callback for function: {func.__name__}")
 
         class Worker(QRunnable):
             """
@@ -179,9 +181,9 @@ class AsyncRunner:
                 It handles exceptions gracefully and always emits the finished signal.
                 """
                 try:
-                    log.info(f"Worker started: {func.__name__}")
+                    log.debug(f"Worker started: {func.__name__}")
                     func()
-                    log.info(f"Worker finished: {func.__name__}")
+                    log.debug(f"Worker finished: {func.__name__}")
                 except Exception as e:
                     log.error(f"Exception in AsyncRunner Worker: {e}", exc_info=True)
                 finally:
@@ -213,7 +215,6 @@ class AsyncRunner:
         worker = Worker()
         try:
             self.threadpool.start(worker)
-            log.debug(f"Started worker thread for function: {func.__name__}")
         except RuntimeError as e:
             log.error(
                 f"Failed to start worker thread for function {func.__name__}: {e}"
