@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Optional
 if TYPE_CHECKING:
     import numpy as np
 
-from PySide6.QtCore import QRectF, QSize, Qt, QTimer
+from PySide6.QtCore import QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QCloseEvent,
     QColor,
@@ -46,7 +46,7 @@ from ..helpers.async_runner import AsyncRunner
 from ..helpers.logger import get_logger
 from ..helpers.security import is_safe_media_url
 from ..helpers.themes import RAVEN_CORE
-from ..helpers.utils_light import load_config
+from ..helpers.utils_light import is_raven_device, load_config
 
 _QT_FORMAT_BGR = getattr(QImage, "Format_BGR888", None) or getattr(
     getattr(QImage, "Format", None), "Format_BGR888", None
@@ -101,8 +101,36 @@ def _validated_redirect_get(url: str, headers: dict, *, timeout: int):
 
 class MediaViewer(QWidget):
     """
-    A QWidget subclass that displays images, GIFs, or videos (MP4, AVI, etc.)
-    with rounded corners, auto-scaling, and playback controls.
+    A QWidget subclass that displays images, GIFs, or video with rounded
+    corners, auto-scaling, and playback controls.
+
+    Video prefers hardware decode on a real device: `v4l2h264dec` (VPU) ->
+    `imxg2dvideotransform` (G2D color-space convert) via GStreamer, the same
+    chain raven-canopy's Perch YouTube player uses (see
+    raven/apps/perch/gst_youtube_player.py). imxg2dvideotransform is
+    required because v4l2h264dec's output is DMABuf-backed, which plain
+    `videoconvert` cannot negotiate -- see that file's docstring for the
+    full story. `parsebin` (not a container-specific demuxer) is used so
+    any container GStreamer can identify (mp4/mov/mkv/avi/...) works
+    generically; only the H.264 elementary stream inside is linked to the
+    hardware decoder (this SoC's VPU decode path is H.264/H.265/VP8/VP9 in
+    hardware, but only H.264 is wired up here).
+
+    Everything else falls back to software decode (`cv2.VideoCapture`,
+    forced onto the FFMPEG backend -- see `_load_video_opencv_fallback`),
+    so anything that could play before this hardware path existed still
+    plays: the simulator (v4l2h264dec/imxg2dvideotransform are i.MX-specific
+    and don't exist on a dev laptop), a device image missing those plugins,
+    a non-H.264 codec, or a runtime GStreamer pipeline error. Benchmarking
+    (prototyping/software-experiments/media-decode-bench, later moved to
+    projects/raven-canopy/tools/cpu-tests/) found the hardware path far
+    faster and far cheaper on CPU at every frequency versus always using
+    the software path -- and separately found bare `cv2.VideoCapture(path)`
+    (no explicit backend) prone to hanging indefinitely inside a live
+    Qt/Wayland app, since it can pick GStreamer as its own backend and
+    deadlock initializing a second GStreamer main loop from inside Qt's --
+    confirmed reproducible, root-caused, fixed here by forcing
+    `cv2.CAP_FFMPEG` explicitly wherever the software path is used.
 
     Args:
         media_path (Optional[str]): Path to the media file to load. Defaults to None.
@@ -120,6 +148,19 @@ class MediaViewer(QWidget):
         gif_autostart (bool): If False, GIF is loaded but does not play until start_gif() is called.
             Defaults to True.
     """
+
+    # Emitted from the GStreamer streaming thread with a decoded BGRx frame
+    # (raw bytes, width, height); queued automatically onto this widget's
+    # main thread since sender/receiver threads differ, so the connected
+    # slot can safely touch Qt (build a QImage, call setPixmap, etc.).
+    _gst_frame_ready = Signal(bytes, int, int)
+
+    # Emitted (possibly from the GStreamer streaming thread, e.g. from a
+    # pad-added callback -- queued onto the main thread automatically) when
+    # the hardware path can't actually play this file (wrong codec, runtime
+    # pipeline error) and should fall back to software decode so playback
+    # still happens instead of silently showing nothing.
+    _gst_fallback_needed = Signal(str)
 
     def __init__(
         self,
@@ -189,14 +230,22 @@ class MediaViewer(QWidget):
 
         self.movie = None
         self.is_video = False
+        # Hardware path (real device -- see _load_video_gstreamer)
+        self._gst_module = None  # the gi.repository.Gst module, once Gst.init() has run
+        self._gst_pipeline = None
+        self._gst_bus_timer: Optional[QTimer] = None
+        self._gst_frame_ready.connect(self._display_gst_frame)
+        self._gst_fallback_needed.connect(self._fallback_to_opencv)
+        # Software fallback path (simulator, or a device image missing the
+        # hardware-decode plugins -- see _load_video_opencv_fallback)
         self.cap = None
         self.timer = None
-        self._frame_count = 0
-        self._fps_report_timer: Optional[QTimer] = None
         self._frame_busy = False
         self._display_buffer = (
             None  # reused for same-size video path (numpy BGR when _QT_FORMAT_BGR)
         )
+        self._frame_count = 0
+        self._fps_report_timer: Optional[QTimer] = None
         self.pixmap_provided = pixmap_provided
         self._async_runner = AsyncRunner()
         self._load_request_id = 0
@@ -374,17 +423,223 @@ class MediaViewer(QWidget):
 
         self._async_runner.run(run_download, on_complete=on_complete)
 
-    def _load_video_opencv(self, path: str) -> None:
-        """Load video with OpenCV (FFMPEG backend)."""
+    def _load_video(self, path: str) -> None:
+        """
+        Dispatches to hardware-decoded GStreamer playback on a real device,
+        or the software OpenCV fallback in the simulator -- `v4l2h264dec`
+        and `imxg2dvideotransform` are i.MX-specific and don't exist on a
+        developer's Mac/Windows/Linux laptop. Also falls back on-device if
+        hardware element creation fails for any reason (e.g. an older image
+        missing the gstreamer-imx recipe -- see raven-os's
+        `[RV-1683] feat: add gstreamer-imx G2D hardware-decode-convert recipe`).
+        """
+        if is_raven_device():
+            self._load_video_gstreamer(path)
+            if self._gst_pipeline is not None:
+                return
+            log.warning(
+                "Hardware video decode unavailable on this device image "
+                "(v4l2h264dec/imxg2dvideotransform missing) -- falling back to software decode."
+            )
+        self._load_video_opencv_fallback(path)
+
+    def _load_video_gstreamer(self, path: str) -> None:
+        """
+        Load and start playing video via hardware decode: filesrc -> parsebin
+        (generic demux+parse, any container) -> v4l2h264dec (VPU) ->
+        imxg2dvideotransform (G2D convert to system-memory BGRx, required --
+        see class docstring) -> appsink. Frames arrive via `_on_gst_new_sample`
+        on the GStreamer streaming thread and are handed to Qt via the
+        `_gst_frame_ready` signal.
+        """
+        try:
+            import gi
+
+            gi.require_version("Gst", "1.0")
+            from gi.repository import Gst
+        except (ImportError, ValueError) as e:
+            log.error(f"GStreamer/PyGObject not available; cannot play video: {e}")
+            return
+
+        Gst.init(None)
+        self._gst_module = Gst
+        self._gst_video_path = path
+        self.is_video = True
+
+        pipeline = Gst.Pipeline.new("mediaviewer-pipeline")
+        src = Gst.ElementFactory.make("filesrc", "src")
+        parse = Gst.ElementFactory.make("parsebin", "parse")
+        dec = Gst.ElementFactory.make("v4l2h264dec", "dec")
+        g2d = Gst.ElementFactory.make("imxg2dvideotransform", "g2d")
+        capsfilter = Gst.ElementFactory.make("capsfilter", "capsfilter")
+        appsink = Gst.ElementFactory.make("appsink", "appsink")
+
+        if not all([pipeline, src, parse, dec, g2d, capsfilter, appsink]):
+            log.error("Failed to create one or more GStreamer elements for hardware video decode")
+            self.is_video = False
+            return
+
+        src.set_property("location", path)
+        capsfilter.set_property("caps", Gst.Caps.from_string("video/x-raw,format=BGRx"))
+        appsink.set_property("emit-signals", True)
+        appsink.set_property("sync", True)
+        appsink.set_property("max-buffers", 2)
+        appsink.set_property("drop", True)
+
+        for element in (src, parse, dec, g2d, capsfilter, appsink):
+            pipeline.add(element)
+
+        src.link(parse)
+        dec.link(g2d)
+        g2d.link(capsfilter)
+        capsfilter.link(appsink)
+
+        def on_pad_added(_element, pad) -> None:
+            """parsebin exposes pads dynamically per elementary stream found
+            in the container -- link only the H.264 video pad to the
+            hardware decoder chain; ignore audio (this class has never
+            played it). A non-H.264 video codec falls back to software
+            decode instead of silently playing nothing -- anything the old
+            cv2-only path could play should still play."""
+            caps = pad.get_current_caps() or pad.query_caps(None)
+            structure = caps.get_structure(0) if caps and caps.get_size() > 0 else None
+            name = structure.get_name() if structure else ""
+            if name.startswith("video/") and name != "video/x-h264":
+                log.warning(
+                    f"Video stream is {name!r}, not H.264 -- this SoC's hardware "
+                    "decode path is only wired up for H.264 in MediaViewer; "
+                    "falling back to software decode."
+                )
+                self._gst_fallback_needed.emit(path)
+                return
+            if name != "video/x-h264":
+                return
+            sink_pad = dec.get_static_pad("sink")
+            if not sink_pad.is_linked():
+                pad.link(sink_pad)
+
+        parse.connect("pad-added", on_pad_added)
+        appsink.connect("new-sample", self._on_gst_new_sample)
+
+        self._gst_pipeline = pipeline
+        self._gst_bus_timer = QTimer(self)
+        self._gst_bus_timer.timeout.connect(self._poll_gst_bus)
+        self._gst_bus_timer.start(250)
+
+        self._frame_count = 0
+        if self._show_fps_report:
+            self._start_fps_report_timer()
+
+        pipeline.set_state(Gst.State.PLAYING)
+
+    def _on_gst_new_sample(self, appsink):
+        """Runs on the GStreamer streaming thread -- must not touch Qt
+        directly, hence emitting `_gst_frame_ready` (queued onto the main
+        thread automatically since sender/receiver threads differ)."""
+        Gst = self._gst_module
+        sample = appsink.emit("pull-sample")
+        if sample is None:
+            return Gst.FlowReturn.OK
+        buf = sample.get_buffer()
+        caps = sample.get_caps()
+        structure = caps.get_structure(0)
+        width = structure.get_value("width")
+        height = structure.get_value("height")
+        data = buf.extract_dup(0, buf.get_size())
+        self._gst_frame_ready.emit(data, width, height)
+        return Gst.FlowReturn.OK
+
+    def _display_gst_frame(self, data: bytes, width: int, height: int) -> None:
+        """Main-thread slot for `_gst_frame_ready`. BGRx (4 bytes/pixel) maps
+        directly to QImage.Format_RGB32 -- in memory (little-endian) that
+        format reads each 32-bit word as bytes B,G,R,x, exactly BGRx's
+        layout (the 4th byte is unused padding either way)."""
+        try:
+            qimg = QImage(data, width, height, 4 * width, QImage.Format.Format_RGB32)
+            pixmap = self._scaled_pixmap(
+                QPixmap.fromImage(qimg), self.media_widget.width(), self.media_widget.height()
+            )
+            self.media_widget.setPixmap(pixmap)
+            if self._show_fps_report:
+                self._frame_count += 1
+        except Exception as e:
+            log.error(f"Error displaying GStreamer video frame: {e}", exc_info=True)
+
+    def _poll_gst_bus(self) -> None:
+        """Polls the pipeline's bus for EOS/ERROR on a QTimer instead of a
+        GLib main loop watch (Qt's event loop doesn't drive GLib's default
+        main context, so add_signal_watch() callbacks would otherwise never
+        fire -- same pattern as gst_youtube_player.py's `_poll_bus`)."""
+        if not self._gst_pipeline:
+            return
+        Gst = self._gst_module
+        bus = self._gst_pipeline.get_bus()
+        while True:
+            message = bus.pop_filtered(Gst.MessageType.EOS | Gst.MessageType.ERROR)
+            if message is None:
+                break
+            if message.type == Gst.MessageType.ERROR:
+                err, debug = message.parse_error()
+                log.error(
+                    f"GStreamer pipeline error: {err} ({debug}) -- falling back to software decode"
+                )
+                self._gst_fallback_needed.emit(self._gst_video_path)
+                return
+            elif message.type == Gst.MessageType.EOS:
+                if self.loop_video:
+                    self._gst_pipeline.seek_simple(Gst.Format.TIME, Gst.SeekFlags.FLUSH, 0)
+                else:
+                    self.cleanup_video_resources()
+                    return
+
+    def _fallback_to_opencv(self, path: str) -> None:
+        """Tears down a hardware pipeline that can't actually play this file
+        (wrong codec, or a runtime pipeline error) and retries via software
+        decode, so anything the old cv2-only path could play still plays.
+        Guarded against firing twice for the same pipeline (a codec-mismatch
+        pad and a later bus error could in principle both fire) by checking
+        ``_gst_pipeline`` is still set -- this method is the only place that
+        clears it outside of normal cleanup."""
+        if self._gst_pipeline is None:
+            return
+        log.info(f"Falling back to software video decode for: {path}")
+        self._stop_fps_report_timer()
+        self._frame_count = 0
+        if self._gst_bus_timer is not None:
+            self._gst_bus_timer.stop()
+            self._gst_bus_timer.deleteLater()
+            self._gst_bus_timer = None
+        self._gst_pipeline.set_state(self._gst_module.State.NULL)
+        self._gst_pipeline = None
+        self._load_video_opencv_fallback(path)
+
+    def _load_video_opencv_fallback(self, path: str) -> None:
+        """
+        Software-decode fallback for contexts with no hardware VPU: the
+        simulator (any developer laptop -- Mac/Windows/Linux -- has neither
+        `v4l2h264dec` nor `imxg2dvideotransform`, which are i.MX-specific),
+        or a real device image that's somehow missing those plugins.
+
+        Forces the FFMPEG backend explicitly (`cv2.CAP_FFMPEG`) rather than
+        letting `cv2.VideoCapture(path)` auto-pick: on the on-device OpenCV
+        build (which has both FFMPEG and GStreamer support compiled in),
+        auto-pick chose GStreamer, which deadlocked initializing its own
+        main loop/context from inside this already-running Qt+Wayland
+        event loop -- confirmed reproducible, root-caused during the
+        hardware-decode benchmark that motivated this whole change (see
+        class docstring). Forcing FFMPEG avoided it entirely. Applying the
+        same fix here defensively, since any OpenCV build with multiple
+        backends compiled in could hit the same class of bug.
+        """
         import cv2
         import numpy as np
 
         self._cv2 = cv2
         self._np = np
         self.is_video = True
-        self.cap = cv2.VideoCapture(path)
+        self.cap = cv2.VideoCapture(path, cv2.CAP_FFMPEG)
         if not self.cap.isOpened():
-            log.error("Failed to open video file.")
+            log.error("Failed to open video file (software fallback).")
             self.cap = None
             return
 
@@ -399,6 +654,107 @@ class MediaViewer(QWidget):
         if self._show_fps_report:
             self._start_fps_report_timer()
         self.timer.start(interval)
+
+    def next_frame(self) -> None:
+        """
+        Called periodically by timer to fetch and display the next video
+        frame -- software fallback path only (`_load_video_opencv_fallback`).
+        The hardware path (`_load_video_gstreamer`) is push-based via
+        `_on_gst_new_sample`/`_display_gst_frame` instead, since GStreamer
+        delivers frames on its own thread rather than being polled.
+
+        Automatically handles video looping if loop_video is enabled. Skips if still
+        processing the previous frame to avoid piling up work.
+        """
+        if not self.cap:
+            return
+        if self._frame_busy:
+            return
+
+        cv2 = self._cv2
+        np = self._np
+
+        ret, frame = self.cap.read()
+        if not ret:
+            log.info("Video ended or cannot read frame.")
+            if self.loop_video:
+                log.info("Looping video...")
+                self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                return
+            else:
+                self.cleanup_video_resources()
+                return
+
+        self._frame_busy = True
+        try:
+            if _QT_FORMAT_BGR is None:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+            target_w = self.media_widget.width()
+            target_h = self.media_widget.height()
+            frame_h, frame_w, _ = frame.shape
+            qt_fmt = (
+                _QT_FORMAT_BGR if _QT_FORMAT_BGR is not None else QImage.Format_RGB888
+            )
+            use_cover = self._scale_mode == "cover"
+
+            if use_cover and frame_w == target_w and frame_h == target_h:
+                # Same size (cover): copy into reusable buffer
+                if self._display_buffer is not None and self._display_buffer.shape == (
+                    target_h,
+                    target_w,
+                    3,
+                ):
+                    np.copyto(self._display_buffer, frame)
+                    qt_image = QImage(
+                        self._display_buffer.data,
+                        target_w,
+                        target_h,
+                        3 * target_w,
+                        qt_fmt,
+                    )
+                else:
+                    out = np.ascontiguousarray(frame)
+                    qt_image = QImage(
+                        out.data,
+                        target_w,
+                        target_h,
+                        3 * target_w,
+                        qt_fmt,
+                    )
+                pixmap = QPixmap.fromImage(qt_image)
+            else:
+                # Scale by mode: cover = fill and crop, fit = fit inside
+                new_w, new_h = self._scale_dimensions(
+                    frame_w, frame_h, target_w, target_h
+                )
+                resized = cv2.resize(
+                    frame, (new_w, new_h), interpolation=cv2.INTER_AREA
+                )
+                if use_cover and (new_w > target_w or new_h > target_h):
+                    x_start = (new_w - target_w) // 2
+                    y_start = (new_h - target_h) // 2
+                    cropped = resized[
+                        y_start : y_start + target_h, x_start : x_start + target_w
+                    ]
+                    out = np.ascontiguousarray(cropped)
+                    qt_image = QImage(
+                        out.data, target_w, target_h, 3 * target_w, qt_fmt
+                    )
+                else:
+                    out = np.ascontiguousarray(resized)
+                    qt_image = QImage(out.data, new_w, new_h, 3 * new_w, qt_fmt)
+                pixmap = QPixmap.fromImage(qt_image)
+
+            self.media_widget.setPixmap(pixmap)
+
+            if self._show_fps_report:
+                self._frame_count += 1
+
+        except Exception as e:
+            log.error(f"Error processing video frame: {e}", exc_info=True)
+        finally:
+            self._frame_busy = False
 
     def _start_fps_report_timer(self) -> None:
         """Start timer that every FPS_REPORT_INTERVAL_SEC seconds prints actual fps."""
@@ -511,108 +867,11 @@ class MediaViewer(QWidget):
                     log.error("Invalid GIF file or failed to load.")
 
             elif ext in [".mp4", ".avi", ".mov", ".mkv"]:
-                self._load_video_opencv(path)
+                self._load_video(path)
             else:
                 log.warning(f"Unsupported media type: {ext}")
         except Exception as e:
             log.error(f"Error loading media {path}: {e}", exc_info=True)
-
-    def next_frame(self) -> None:
-        """
-        Called periodically by timer to fetch and display the next video frame.
-
-        Automatically handles video looping if loop_video is enabled. Skips if still
-        processing the previous frame to avoid piling up work.
-        """
-        if not self.cap:
-            return
-        if self._frame_busy:
-            return
-
-        cv2 = self._cv2
-        np = self._np
-
-        ret, frame = self.cap.read()
-        if not ret:
-            log.info("Video ended or cannot read frame.")
-            if self.loop_video:
-                log.info("Looping video...")
-                self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                return
-            else:
-                self.cleanup_video_resources()
-                return
-
-        self._frame_busy = True
-        try:
-            if _QT_FORMAT_BGR is None:
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-            target_w = self.media_widget.width()
-            target_h = self.media_widget.height()
-            frame_h, frame_w, _ = frame.shape
-            qt_fmt = (
-                _QT_FORMAT_BGR if _QT_FORMAT_BGR is not None else QImage.Format_RGB888
-            )
-            use_cover = self._scale_mode == "cover"
-
-            if use_cover and frame_w == target_w and frame_h == target_h:
-                # Same size (cover): copy into reusable buffer
-                if self._display_buffer is not None and self._display_buffer.shape == (
-                    target_h,
-                    target_w,
-                    3,
-                ):
-                    np.copyto(self._display_buffer, frame)
-                    qt_image = QImage(
-                        self._display_buffer.data,
-                        target_w,
-                        target_h,
-                        3 * target_w,
-                        qt_fmt,
-                    )
-                else:
-                    out = np.ascontiguousarray(frame)
-                    qt_image = QImage(
-                        out.data,
-                        target_w,
-                        target_h,
-                        3 * target_w,
-                        qt_fmt,
-                    )
-                pixmap = QPixmap.fromImage(qt_image)
-            else:
-                # Scale by mode: cover = fill and crop, fit = fit inside
-                new_w, new_h = self._scale_dimensions(
-                    frame_w, frame_h, target_w, target_h
-                )
-                resized = cv2.resize(
-                    frame, (new_w, new_h), interpolation=cv2.INTER_AREA
-                )
-                if use_cover and (new_w > target_w or new_h > target_h):
-                    x_start = (new_w - target_w) // 2
-                    y_start = (new_h - target_h) // 2
-                    cropped = resized[
-                        y_start : y_start + target_h, x_start : x_start + target_w
-                    ]
-                    out = np.ascontiguousarray(cropped)
-                    qt_image = QImage(
-                        out.data, target_w, target_h, 3 * target_w, qt_fmt
-                    )
-                else:
-                    out = np.ascontiguousarray(resized)
-                    qt_image = QImage(out.data, new_w, new_h, 3 * new_w, qt_fmt)
-                pixmap = QPixmap.fromImage(qt_image)
-
-            self.media_widget.setPixmap(pixmap)
-
-            if self._show_fps_report:
-                self._frame_count += 1
-
-        except Exception as e:
-            log.error(f"Error processing video frame: {e}", exc_info=True)
-        finally:
-            self._frame_busy = False
 
     def paintEvent(self, event: QPaintEvent) -> None:
         """
@@ -686,13 +945,25 @@ class MediaViewer(QWidget):
 
     def cleanup_video_resources(self) -> None:
         """
-        Clean up video-related resources to prevent memory leaks.
+        Clean up video-related resources to prevent memory leaks. Tears
+        down whichever path is active (hardware GStreamer pipeline or
+        software OpenCV fallback) -- only one is ever active per instance.
         """
         try:
-            self._frame_busy = False
-            self._display_buffer = None
             self._stop_fps_report_timer()
             self._frame_count = 0
+
+            if self._gst_bus_timer is not None:
+                self._gst_bus_timer.stop()
+                self._gst_bus_timer.deleteLater()
+                self._gst_bus_timer = None
+            if self._gst_pipeline is not None:
+                Gst = self._gst_module
+                self._gst_pipeline.set_state(Gst.State.NULL)
+                self._gst_pipeline = None
+
+            self._frame_busy = False
+            self._display_buffer = None
             if self.timer and self.timer.isActive():
                 self.timer.stop()
                 self.timer.deleteLater()
@@ -700,6 +971,7 @@ class MediaViewer(QWidget):
             if self.cap:
                 self.cap.release()
                 self.cap = None
+
             log.debug("Video resources cleaned up")
         except Exception as e:
             log.error(f"Error cleaning up video resources: {e}", exc_info=True)
@@ -880,10 +1152,14 @@ class MediaViewer(QWidget):
         """
         Resume video or GIF playback.
 
-        Starts the video timer or unpauses the GIF animation.
+        Sets the GStreamer pipeline to PLAYING (hardware path), starts the
+        video timer (software fallback path), or unpauses the GIF
+        animation -- whichever is active.
         """
         try:
-            if self.is_video and self.cap and self.timer and not self.timer.isActive():
+            if self.is_video and self._gst_pipeline is not None:
+                self._gst_pipeline.set_state(self._gst_module.State.PLAYING)
+            elif self.is_video and self.cap and self.timer and not self.timer.isActive():
                 self.timer.start()
             elif self.movie:
                 self.movie.setPaused(False)
@@ -894,10 +1170,14 @@ class MediaViewer(QWidget):
         """
         Pause video or GIF playback.
 
-        Stops the video timer or pauses the GIF animation.
+        Sets the GStreamer pipeline to PAUSED (hardware path), stops the
+        video timer (software fallback path), or pauses the GIF animation
+        -- whichever is active.
         """
         try:
-            if self.is_video and self.cap and self.timer and self.timer.isActive():
+            if self.is_video and self._gst_pipeline is not None:
+                self._gst_pipeline.set_state(self._gst_module.State.PAUSED)
+            elif self.is_video and self.cap and self.timer and self.timer.isActive():
                 self.timer.stop()
             elif self.movie:
                 self.movie.setPaused(True)
