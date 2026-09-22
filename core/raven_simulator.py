@@ -199,6 +199,14 @@ def blend_frame(bg_bgr, snapshot_bgr):
     #    space (after linearizing the HUD). We use a single PSF for all three
     #    channels (R, G, B) for now.
     #
+    # 2b. OPTIONAL WAVEGUIDE HALO
+    #    A separate, purely visual effect (apply_waveguide_halo): adds one
+    #    broad, low-energy blur of the linear HUD back onto itself, sharp
+    #    core intact, approximating light leakage on the waveguide. Runs in
+    #    the same linear-light space as the PSF step above, independently of
+    #    it; either one enabled forces demand (below) to be computed from
+    #    linear HUD bytes instead of the raw sRGB snapshot.
+    #
     # 3. CALCULATING HUD DEMAND (FROM LUMINANCE)
     #    hud_lum = weight_r * hud_lin[0] + weight_g * hud_lin[1] + weight_b * hud_lin[2]
     #    with weight_r, weight_g, weight_b = CIE_R_Y/TOTAL_CIE_Y etc. (normalized) and hud_lin[0], hud_lin[1], hud_lin[2]
@@ -254,7 +262,10 @@ def blend_frame(bg_bgr, snapshot_bgr):
     # HOW THIS IS COMPUTED (LUT-BASED)
     #    Step 1 (math step 1): Linearize bg and HUD via _LUT_SRGB_TO_LIN_BYTE.
     #    Step 2 (math step 2): If PSF enabled, convolve linear HUD only (cv2.filter2D).
-    #    Step 3 (math step 3): Demand d from _LUT_D_3D_LINEAR(lin_hud) if PSF, else _LUT_D_3D(sRGB snapshot).
+    #    Step 2b (math step 2b): If the waveguide halo is enabled, blend it
+    #    into the linear HUD too (apply_waveguide_halo).
+    #    Step 3 (math step 3): Demand d from _LUT_D_3D_LINEAR(lin_hud) if
+    #    either optional step ran, else _LUT_D_3D(sRGB snapshot).
     #    Step 4 (math steps 4 and 5): Blended output via _LUT_OUT_3D(bg_lin_byte, hud_lin_byte, d) per channel;
     #    each entry = out_lin = bg_lin*(1-d)+hud_lin then linear→sRGB byte.
     # -------------------------------------------------------------------------
@@ -264,18 +275,18 @@ def blend_frame(bg_bgr, snapshot_bgr):
     bi = cv2.LUT(bg_bgr, _LUT_SRGB_TO_LIN_BYTE)
     si = cv2.LUT(snapshot_bgr, _LUT_SRGB_TO_LIN_BYTE)
 
-    # Raven's current calibrated PSF remains untouched and disabled by default.
-    # The optional halo below is a separate perceptual approximation: sharp HUD
-    # core + broad low-energy light leak, applied in linear-light byte space.
+    # Step 2
     use_linear_demand = False
     if CONSIDER_POINT_SPREAD:
         si = cv2.filter2D(si, -1, POINT_SPREAD_KERNEL)
         use_linear_demand = True
 
+    # Step 2b
     if CONSIDER_WAVEGUIDE_HALO:
         si = apply_waveguide_halo(si, HALO_RADIUS, HALO_STRENGTH)
         use_linear_demand = True
 
+    # Step 3
     if use_linear_demand:
         d = _LUT_D_3D_LINEAR[si[:, :, 0], si[:, :, 1], si[:, :, 2]]
     else:
