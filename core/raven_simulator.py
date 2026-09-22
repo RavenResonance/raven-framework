@@ -54,16 +54,14 @@ from .simulator_background import (
     _list_uploaded_backgrounds,
 )
 
-# Feature flags
-USE_SIMPLE_ADDITIVE_BLEND = False
-ENABLE_TINT = False
-ENABLE_UI_SHRINK = True
-ENABLE_SIMULATE_BACKLIGHT = True
-
 log = get_logger("RunApp")
 _config = load_config()
 
-
+# Feature flags
+USE_SIMPLE_ADDITIVE_BLEND = _config["simulator"]["USE_SIMPLE_ADDITIVE_BLEND"]
+ENABLE_UI_SHRINK = _config["simulator"]["ENABLE_UI_SHRINK"]
+ENABLE_SIMULATE_BACKLIGHT = _config["simulator"]["ENABLE_SIMULATE_BACKLIGHT"]
+ENABLE_TINT = _config["simulator"]["DEFAULT_ENABLE_TINT"]
 OVERLAY_FRAME_RATE = _config["fps"]["SIMULATOR_FPS"]
 DISPLAY_RESOLUTION = tuple(_config["resolution"]["DISPLAY_RESOLUTION"])
 DEFAULT_OVERLAY_BRIGHTNESS = _config["simulator"]["DEFAULT_OVERLAY_BRIGHTNESS"]
@@ -77,6 +75,11 @@ UI_SHRINK_WIDTH = _config["simulator"]["UI_SHRINK_WIDTH"]
 UI_SHRINK_HEIGHT = _config["simulator"]["UI_SHRINK_HEIGHT"]
 UI_SHRINK_OFFSET_X = _config["simulator"]["UI_SHRINK_OFFSET_X"]
 UI_SHRINK_OFFSET_Y = _config["simulator"]["UI_SHRINK_OFFSET_Y"]
+CONSIDER_POINT_SPREAD = _config["simulator"]["CONSIDER_POINT_SPREAD"]
+CONSIDER_WAVEGUIDE_HALO = _config["simulator"]["CONSIDER_WAVEGUIDE_HALO"]
+HALO_RADIUS = _config["simulator"]["HALO_RADIUS"]
+HALO_STRENGTH = _config["simulator"]["HALO_STRENGTH"]
+
 
 DEFAULT_SIMULATOR_BACKGROUND_RGB = (40, 40, 40)
 BACKLIGHT_COLOR_RGB = (7, 7, 15)
@@ -101,10 +104,6 @@ TOTAL_CIE_Y = CIE_R_Y + CIE_G_Y + CIE_B_Y
 _WEIGHT_R = CIE_R_Y / TOTAL_CIE_Y
 _WEIGHT_G = CIE_G_Y / TOTAL_CIE_Y
 _WEIGHT_B = CIE_B_Y / TOTAL_CIE_Y
-CONSIDER_POINT_SPREAD = False
-CONSIDER_WAVEGUIDE_HALO = _config["simulator"]["CONSIDER_WAVEGUIDE_HALO"]
-HALO_RADIUS = _config["simulator"]["HALO_RADIUS"]
-HALO_STRENGTH = _config["simulator"]["HALO_STRENGTH"]
 
 
 def _build_srgb_linear_luts():
