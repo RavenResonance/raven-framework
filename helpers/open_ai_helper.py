@@ -27,6 +27,13 @@ from .utils import convert_ndarray_to_base64_image
 
 log = get_logger("OpenAiHelper")
 
+# The SDK's own defaults (10 min total timeout, 2 retries with backoff) assume a
+# server-side workload where waiting is fine. On a device that may lose WiFi
+# mid-call, that means a single stalled request can block its caller for
+# minutes. Bound it to something a foreground UI can recover from instead.
+_DEFAULT_TIMEOUT_SECONDS = 20.0
+_DEFAULT_MAX_RETRIES = 1
+
 
 class OpenAiHelper:
     """
@@ -35,9 +42,22 @@ class OpenAiHelper:
 
     Args:
         open_ai_key (str): API key for OpenAI. Defaults to "".
+        timeout (float): Per-request timeout in seconds, covering connect +
+            read. Defaults to ``_DEFAULT_TIMEOUT_SECONDS`` — short enough that
+            a caller blocked on this (e.g. inside an AsyncRunner worker) fails
+            predictably instead of hanging for the SDK's multi-minute default.
+        max_retries (int): SDK-level retry count on transient failures.
+            Defaults to ``_DEFAULT_MAX_RETRIES`` (lower than the SDK default of
+            2) so a dead network fails fast rather than retrying into the same
+            timeout budget repeatedly.
     """
 
-    def __init__(self, open_ai_key: str = "") -> None:
+    def __init__(
+        self,
+        open_ai_key: str = "",
+        timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+        max_retries: int = _DEFAULT_MAX_RETRIES,
+    ) -> None:
         """
         Initialize the OpenAI helper with API key.
 
@@ -48,7 +68,9 @@ class OpenAiHelper:
                 log.error("No OpenAI key available", exc_info=True)
                 self.client = None
                 return
-            self.client: Optional[OpenAI] = OpenAI(api_key=open_ai_key)
+            self.client: Optional[OpenAI] = OpenAI(
+                api_key=open_ai_key, timeout=timeout, max_retries=max_retries
+            )
             log.info("OpenAI client initialized.")
         except Exception as e:
             log.error(f"Failed to initialize OpenAI client: {e}", exc_info=True)

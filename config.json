@@ -10,7 +10,7 @@
   "deployment": {
     "DEPLOY_ENDPOINT_URL": "https://api.s.raven.computer/developer/deploy/app/",
     "ACCEPTING_DEPLOYMENTS": true,
-    "PYTHON_VERSION_ON_RAVEN_DEVICE": "3.12.12"
+    "PYTHON_VERSION_ON_RAVEN_DEVICE": "3.14"
   },
   "peripherals": {
     "DEFAULT_CAMERA_INDEX": 0,
@@ -55,6 +55,11 @@
     "CONSIDER_WAVEGUIDE_HALO": false,
     "HALO_RADIUS": 20,
     "HALO_STRENGTH": 0.05
+    "FIXED_BACKGROUND_TINT_FACTOR": 0.4,
+    "UI_SHRINK_WIDTH": 600,
+    "UI_SHRINK_HEIGHT": 600,
+    "UI_SHRINK_OFFSET_X": 85,
+    "UI_SHRINK_OFFSET_Y": 60
   },
   "logger": {
     "LOG_NAME": "raven_log",

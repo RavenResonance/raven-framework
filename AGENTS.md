@@ -781,12 +781,23 @@ audio_bytes = openai.generate_tts("Hello world", voice="alloy")
 - `process_multimodal_with_image(prompt: str, image: ndarray, model: str = "gpt-4o") -> str`
 - `generate_tts(text: str, model: str = "tts-1", voice: str = "alloy", response_format: str = "wav") -> bytes`
 
+### Platform Identity
+
+**Note:** Cannot be simulated in simulator mode — a dev laptop has no authenticated Raven account, so `get_username()` returns `None` off-device.
+
+```python
+from raven_framework import get_username
+
+username = get_username()  # Returns str | None
+```
+
 ## Hardware Specifications
 
 Raven Prism v1 hardware specifications:
 
 * **Operating System:** RavenOS (Linux-based)
 * **Processor:** Quad-core 64-bit ARM processor
+* **Memory:** 2GB or 4GB RAM (variant-dependent)
 * **Graphics:** GPU with OpenGL ES 2.0 support
 * **Display:** 30 degree diagonal FoV, full-color waveguide display on the right eye
 * **Primary Input:** Eye control sensors
@@ -1552,6 +1563,10 @@ python3 main.py deploy
 
 **Note:** Deployment requires valid `app_id` and `app_key` in `RunApp.run()`.
 
+**Two deployment modes:**
+- `deploy` (default) — packages plain `.py` source. Works with any local Python **3.10+**; no version matching needed.
+- `deploy-pyc` — pre-compiles to `.pyc` bytecode locally before packaging, for lightweight IP protection (raises the bar against someone casually opening the package; not strong protection against a determined party — decompilers exist). Compiled bytecode is tied to the exact Python version that compiled it, so this mode requires your local Python's major.minor version to match the Raven device's exactly, or the app will fail to import once deployed. If you don't want to track that pin, use plain `deploy` instead — the device also compiles and caches bytecode automatically on first launch, so most apps don't need `deploy-pyc` for performance.
+
 ## Common Patterns
 
 ### Adding a Button with Click Handler
@@ -1625,4 +1640,6 @@ if __name__ == "__main__":
 ## License
 
 This project is proprietary software. The Raven Framework code and documentation are proprietary and may not be redistributed, modified, or used except as expressly permitted by RavenResonance. Do not push the Raven Framework code to public repositories or distribute it without authorization.
+
+Contributions are welcome under the terms of the [Contributor License Agreement](CLA.md), which must be signed before any Contribution can be accepted.
 

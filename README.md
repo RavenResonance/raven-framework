@@ -1,4 +1,4 @@
-# Raven Framework (alpha v1.0.4)
+# Raven Framework (alpha v1.0.5)
 
 <img src="assets/documentation/logo/horizontal.png" width="100%" alt="Raven Framework Logo">
 
@@ -9,7 +9,7 @@ A comprehensive UI framework and API for building gaze-based applications for Ra
 
 The framework is being developed by Raven Resonance, a team of engineers and designers who have built and used wearable computers for years. [Raven Prism 1](https://raven.computer) will be out soon and runs RavenOS, a Linux-based operating system designed for all-day wear. This repo contains a preview of Raven Framework and is the first part of the Raven SDK. We would love to hear your feedback in our [Discord community](https://raven.computer/s/discord)!
 
-`version = "1.0.4"`
+`version = "1.0.5"`
 
 
 ## Table of Contents
@@ -1152,6 +1152,7 @@ Raven Prism v1 hardware specifications:
 
 * **Operating System:** RavenOS (Linux-based)
 * **Processor:** Quad-core 64-bit ARM processor
+* **Memory:** 2GB or 4GB RAM (variant-dependent)
 * **Graphics:** GPU with OpenGL ES 2.0 support
 * **Display:** 30 degree diagonal FoV, full-color waveguide display on the right eye
 * **Primary Input:** Eye control sensors
@@ -1310,4 +1311,6 @@ The Raven Framework repository includes an `AGENTS.md` file that contains conden
 ## License
 
 This project is proprietary software. The Raven Framework code and documentation are proprietary and may not be redistributed, modified, or used except as expressly permitted by RavenResonance. Do not push the Raven Framework code to public repositories or distribute it without authorization.
+
+Contributions are welcome under the terms of the [Contributor License Agreement](CLA.md), which must be signed before any Contribution can be accepted.
 
