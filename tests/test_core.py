@@ -21,9 +21,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from pytestqt.qtbot import QtBot
-
 import raven_framework
+from pytestqt.qtbot import QtBot
 from raven_framework.core import deploy_app as deploy_app_module
 from raven_framework.core.deploy_app import (
     _load_ravignore,
@@ -183,15 +182,33 @@ def test_copy_assets_minimal_project(tmp_path: Path) -> None:
 def test_deploy_app_aborts_on_python_version_mismatch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A version mismatch previously only logged FATAL ERROR and kept packaging."""
-    monkeypatch.setattr(deploy_app_module, "PYTHON_VERSION_ON_RAVEN_DEVICE", "9.9.9")
+    """A version mismatch previously only logged FATAL ERROR and kept packaging.
+
+    The version pin only applies to compile_pyc=True (bytecode is version-
+    locked); plain source deploys (the default) have no such constraint.
+    """
+    monkeypatch.setattr(deploy_app_module, "PYTHON_VERSION_ON_RAVEN_DEVICE", "9.9")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "main.py").write_text("x = 1\n", encoding="utf-8")
+
+    result = deploy_app_module.deploy_app(app_name="test", compile_pyc=True)
+
+    assert result is None
+    assert list(tmp_path.glob("*.rav")) == []
+
+
+def test_deploy_app_source_mode_ignores_python_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """compile_pyc=False (the default) must work regardless of local Python version."""
+    monkeypatch.setattr(deploy_app_module, "PYTHON_VERSION_ON_RAVEN_DEVICE", "9.9")
     monkeypatch.chdir(tmp_path)
     (tmp_path / "main.py").write_text("x = 1\n", encoding="utf-8")
 
     result = deploy_app_module.deploy_app(app_name="test")
 
-    assert result is None
-    assert list(tmp_path.glob("*.rav")) == []
+    assert result is not None
+    assert list(tmp_path.glob("*.rav")) != []
 
 
 def test_handle_cli_deploy_upload_failure_does_not_raise(

@@ -1,7 +1,13 @@
 {
   "resolution": {
-    "DISPLAY_RESOLUTION": [720, 720],
-    "APP_RESOLUTION": [640, 640]
+    "DISPLAY_RESOLUTION": [
+      720,
+      720
+    ],
+    "APP_RESOLUTION": [
+      640,
+      640
+    ]
   },
   "fps": {
     "UI_FPS": 60,
@@ -10,7 +16,7 @@
   "deployment": {
     "DEPLOY_ENDPOINT_URL": "https://api.s.raven.computer/developer/deploy/app/",
     "ACCEPTING_DEPLOYMENTS": true,
-    "PYTHON_VERSION_ON_RAVEN_DEVICE": "3.12.12"
+    "PYTHON_VERSION_ON_RAVEN_DEVICE": "3.14"
   },
   "peripherals": {
     "DEFAULT_CAMERA_INDEX": 0,
@@ -51,7 +57,20 @@
     "OVERLAY_BACKGROUND_VIDEO_NIGHT_PATH": "assets/overlay_background_videos/night.mp4",
     "OVERLAY_BACKGROUND_VIDEO_OUTDOORS_PATH": "assets/overlay_background_videos/outdoor.mp4",
     "RAW_MODE_TOOLTIP_TEXT": "The raw app that will render on Raven Prism. Use other modes for previewing how it will blend with background, note that performance other modes is relatively less due to real time blending.",
-    "PRINT_SIMULATOR_PERFORMANCE": false
+    "PRINT_SIMULATOR_PERFORMANCE": false,
+    "USE_SIMPLE_ADDITIVE_BLEND": false,
+    "ENABLE_UI_SHRINK": true,
+    "ENABLE_SIMULATE_BACKLIGHT": true,
+    "CONSIDER_POINT_SPREAD": false,
+    "DEFAULT_ENABLE_TINT": false,
+    "CONSIDER_WAVEGUIDE_HALO": true,
+    "HALO_RADIUS": 20,
+    "HALO_STRENGTH": 0.05,
+    "FIXED_BACKGROUND_TINT_FACTOR": 0.4,
+    "UI_SHRINK_WIDTH": 600,
+    "UI_SHRINK_HEIGHT": 600,
+    "UI_SHRINK_OFFSET_X": 85,
+    "UI_SHRINK_OFFSET_Y": 60
   },
   "logger": {
     "LOG_NAME": "raven_log",

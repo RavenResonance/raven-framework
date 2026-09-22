@@ -13,24 +13,31 @@ Displays a background with the app snapshot overlaid for development preview.
 
 import os
 import queue
-import threading
 import time
-from enum import Enum
 from pathlib import Path
 from typing import List, Optional
 
 import numpy as np
-from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QImage, QPixmap
+import shiboken6
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, Qt, QThread, QTimer, Signal
+from PySide6.QtGui import (
+    QColor,
+    QEnterEvent,
+    QImage,
+    QLinearGradient,
+    QMouseEvent,
+    QPainter,
+    QPixmap,
+)
 from PySide6.QtWidgets import (
     QApplication,
-    QFrame,
+    QFileDialog,
     QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QProgressDialog,
     QPushButton,
-    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -39,35 +46,47 @@ from ..helpers.animation_utils import fade_in, fade_out
 from ..helpers.logger import get_logger
 from ..helpers.utils import qpixmap_to_rgb_bytes
 from ..helpers.utils_light import load_config, set_custom_circle_cursor
+from .waveguide_halo import apply_waveguide_halo
+from .simulator_background import (
+    SimulatorBackgroundPreset,
+    SimulatorBackgroundWidget,
+    _BackgroundUploadWorker,
+    _list_uploaded_backgrounds,
+)
 
 log = get_logger("RunApp")
 _config = load_config()
 
-# Constants from config (used by SimulatorBackgroundWidget)
+# Feature flags
+USE_SIMPLE_ADDITIVE_BLEND = _config["simulator"]["USE_SIMPLE_ADDITIVE_BLEND"]
+ENABLE_UI_SHRINK = _config["simulator"]["ENABLE_UI_SHRINK"]
+ENABLE_SIMULATE_BACKLIGHT = _config["simulator"]["ENABLE_SIMULATE_BACKLIGHT"]
+ENABLE_TINT = _config["simulator"]["DEFAULT_ENABLE_TINT"]
 OVERLAY_FRAME_RATE = _config["fps"]["SIMULATOR_FPS"]
-BACKGROUND_VIDEO_FRAME_RATE = _config["fps"]["SIMULATOR_FPS"]
 DISPLAY_RESOLUTION = tuple(_config["resolution"]["DISPLAY_RESOLUTION"])
-INITIAL_CAMERA_FRAMES_TO_DISCARD = _config["peripherals"][
-    "INITIAL_CAMERA_FRAMES_TO_DISCARD"
-]
-OVERLAY_BACKGROUND_VIDEO_DAY_PATH = _config["simulator"][
-    "OVERLAY_BACKGROUND_VIDEO_DAY_PATH"
-]
-OVERLAY_BACKGROUND_VIDEO_NIGHT_PATH = _config["simulator"][
-    "OVERLAY_BACKGROUND_VIDEO_NIGHT_PATH"
-]
-OVERLAY_BACKGROUND_VIDEO_OUTDOORS_PATH = _config["simulator"][
-    "OVERLAY_BACKGROUND_VIDEO_OUTDOORS_PATH"
-]
 DEFAULT_OVERLAY_BRIGHTNESS = _config["simulator"]["DEFAULT_OVERLAY_BRIGHTNESS"]
 APP_WINDOW_RESOLUTION = (DISPLAY_RESOLUTION[0], DISPLAY_RESOLUTION[1])
 CLIENT_DEVICE_ADDITIONAL_WINDOW_HEIGHT = 60
 RAW_MODE_TOOLTIP_TEXT = _config["simulator"]["RAW_MODE_TOOLTIP_TEXT"]
 PRINT_SIMULATOR_PERFORMANCE = _config["simulator"]["PRINT_SIMULATOR_PERFORMANCE"]
 SIMULATOR_CALIBRATION_FILENAME = _config["simulator"]["SIMULATOR_CALIBRATION_FILENAME"]
+FIXED_BACKGROUND_TINT_FACTOR = _config["simulator"]["FIXED_BACKGROUND_TINT_FACTOR"]
+UI_SHRINK_WIDTH = _config["simulator"]["UI_SHRINK_WIDTH"]
+UI_SHRINK_HEIGHT = _config["simulator"]["UI_SHRINK_HEIGHT"]
+UI_SHRINK_OFFSET_X = _config["simulator"]["UI_SHRINK_OFFSET_X"]
+UI_SHRINK_OFFSET_Y = _config["simulator"]["UI_SHRINK_OFFSET_Y"]
+CONSIDER_POINT_SPREAD = _config["simulator"]["CONSIDER_POINT_SPREAD"]
+CONSIDER_WAVEGUIDE_HALO = _config["simulator"]["CONSIDER_WAVEGUIDE_HALO"]
+HALO_RADIUS = _config["simulator"]["HALO_RADIUS"]
+HALO_STRENGTH = _config["simulator"]["HALO_STRENGTH"]
 
-USE_SIMPLE_ADDITIVE_BLEND = False
+
 DEFAULT_SIMULATOR_BACKGROUND_RGB = (40, 40, 40)
+BACKLIGHT_COLOR_RGB = (7, 7, 15)
+_BACKLIGHT_COLOR_BGR = BACKLIGHT_COLOR_RGB[::-1]
+_BACKLIGHT_LAYER_BGR = np.full(
+    (UI_SHRINK_HEIGHT, UI_SHRINK_WIDTH, 3), _BACKLIGHT_COLOR_BGR, dtype=np.uint8
+)
 
 _cal_path = Path(__file__).resolve().parent / SIMULATOR_CALIBRATION_FILENAME
 _cal = np.load(_cal_path, allow_pickle=False)
@@ -85,7 +104,6 @@ TOTAL_CIE_Y = CIE_R_Y + CIE_G_Y + CIE_B_Y
 _WEIGHT_R = CIE_R_Y / TOTAL_CIE_Y
 _WEIGHT_G = CIE_G_Y / TOTAL_CIE_Y
 _WEIGHT_B = CIE_B_Y / TOTAL_CIE_Y
-CONSIDER_POINT_SPREAD = False
 
 
 def _build_srgb_linear_luts():
@@ -146,12 +164,19 @@ def _build_srgb_to_lin_byte():
     return (np.clip(_LUT_SRGB_TO_LIN * 255.0, 0, 255)).astype(np.uint8)
 
 
+def _build_lut_tint(factor: float):
+    """256-entry uint8 LUT: value -> round(value*factor) clipped to [0,255]."""
+    values = np.round(np.arange(256, dtype=np.float32) * factor)
+    return np.clip(values, 0, 255).astype(np.uint8)
+
+
 _LUT_SRGB_TO_LIN, _LUT_LIN_TO_SRGB = _build_srgb_linear_luts()
 _LUT_LIN_TO_SRGB_BYTE = _build_lin_to_srgb_byte()
 _LUT_SRGB_TO_LIN_BYTE = _build_srgb_to_lin_byte()
 _LUT_D_3D = _build_lut_d_3d()
 _LUT_D_3D_LINEAR = _build_lut_d_3d_linear()
 _LUT_OUT_3D = _build_lut_out_3d()
+_LUT_TINT = _build_lut_tint(FIXED_BACKGROUND_TINT_FACTOR)
 
 
 def blend_frame(bg_bgr, snapshot_bgr):
@@ -173,6 +198,14 @@ def blend_frame(bg_bgr, snapshot_bgr):
     #    Blur is a linear operation on light, so the PSF is applied to the HUD in linear
     #    space (after linearizing the HUD). We use a single PSF for all three
     #    channels (R, G, B) for now.
+    #
+    # 2b. OPTIONAL WAVEGUIDE HALO
+    #    A separate, purely visual effect (apply_waveguide_halo): adds one
+    #    broad, low-energy blur of the linear HUD back onto itself, sharp
+    #    core intact, approximating light leakage on the waveguide. Runs in
+    #    the same linear-light space as the PSF step above, independently of
+    #    it; either one enabled forces demand (below) to be computed from
+    #    linear HUD bytes instead of the raw sRGB snapshot.
     #
     # 3. CALCULATING HUD DEMAND (FROM LUMINANCE)
     #    hud_lum = weight_r * hud_lin[0] + weight_g * hud_lin[1] + weight_b * hud_lin[2]
@@ -229,7 +262,10 @@ def blend_frame(bg_bgr, snapshot_bgr):
     # HOW THIS IS COMPUTED (LUT-BASED)
     #    Step 1 (math step 1): Linearize bg and HUD via _LUT_SRGB_TO_LIN_BYTE.
     #    Step 2 (math step 2): If PSF enabled, convolve linear HUD only (cv2.filter2D).
-    #    Step 3 (math step 3): Demand d from _LUT_D_3D_LINEAR(lin_hud) if PSF, else _LUT_D_3D(sRGB snapshot).
+    #    Step 2b (math step 2b): If the waveguide halo is enabled, blend it
+    #    into the linear HUD too (apply_waveguide_halo).
+    #    Step 3 (math step 3): Demand d from _LUT_D_3D_LINEAR(lin_hud) if
+    #    either optional step ran, else _LUT_D_3D(sRGB snapshot).
     #    Step 4 (math steps 4 and 5): Blended output via _LUT_OUT_3D(bg_lin_byte, hud_lin_byte, d) per channel;
     #    each entry = out_lin = bg_lin*(1-d)+hud_lin then linear→sRGB byte.
     # -------------------------------------------------------------------------
@@ -239,12 +275,21 @@ def blend_frame(bg_bgr, snapshot_bgr):
     bi = cv2.LUT(bg_bgr, _LUT_SRGB_TO_LIN_BYTE)
     si = cv2.LUT(snapshot_bgr, _LUT_SRGB_TO_LIN_BYTE)
 
+    # Step 2
+    use_linear_demand = False
     if CONSIDER_POINT_SPREAD:
-        # Step 2 & 3
         si = cv2.filter2D(si, -1, POINT_SPREAD_KERNEL)
+        use_linear_demand = True
+
+    # Step 2b
+    if CONSIDER_WAVEGUIDE_HALO:
+        si = apply_waveguide_halo(si, HALO_RADIUS, HALO_STRENGTH)
+        use_linear_demand = True
+
+    # Step 3
+    if use_linear_demand:
         d = _LUT_D_3D_LINEAR[si[:, :, 0], si[:, :, 1], si[:, :, 2]]
     else:
-        # Step 3
         d = _LUT_D_3D[
             snapshot_bgr[:, :, 0],
             snapshot_bgr[:, :, 1],
@@ -292,7 +337,10 @@ class SimulatorBlendWorker(QObject):
                     bg_rgb = np.full(
                         (h, w, 3), DEFAULT_SIMULATOR_BACKGROUND_RGB, dtype=np.uint8
                     )
-                bg_bgr = cv2.cvtColor(bg_rgb, cv2.COLOR_RGB2BGR)
+                if ENABLE_TINT:
+                    bg_bgr = _LUT_TINT[bg_rgb[..., ::-1]]
+                else:
+                    bg_bgr = cv2.cvtColor(bg_rgb, cv2.COLOR_RGB2BGR)
                 snapshot_bgr = cv2.cvtColor(snapshot_rgb, cv2.COLOR_RGB2BGR)
                 if snapshot_bgr.shape[:2] != bg_bgr.shape[:2]:
                     snapshot_bgr = cv2.resize(
@@ -304,6 +352,22 @@ class SimulatorBlendWorker(QObject):
                     snapshot_bgr = cv2.convertScaleAbs(
                         snapshot_bgr, alpha=brightness, beta=0
                     )
+                if ENABLE_UI_SHRINK:
+                    snapshot_bgr = _shrink_and_letterbox(
+                        snapshot_bgr,
+                        UI_SHRINK_WIDTH,
+                        UI_SHRINK_HEIGHT,
+                        UI_SHRINK_OFFSET_X,
+                        UI_SHRINK_OFFSET_Y,
+                    )
+                    if ENABLE_SIMULATE_BACKLIGHT:
+                        _apply_backlight_in_place(
+                            snapshot_bgr,
+                            UI_SHRINK_OFFSET_X,
+                            UI_SHRINK_OFFSET_Y,
+                            UI_SHRINK_WIDTH,
+                            UI_SHRINK_HEIGHT,
+                        )
                 if USE_SIMPLE_ADDITIVE_BLEND:
                     blended = cv2.add(bg_bgr, snapshot_bgr)
                 else:
@@ -317,363 +381,214 @@ class SimulatorBlendWorker(QObject):
                 log.debug(f"SimulatorBlendWorker: {e}")
 
 
-class SimulatorBackgroundPreset(Enum):
-    """Enum for simulator background presets."""
+def _shrink_and_letterbox(
+    frame, shrink_w: int, shrink_h: int, offset_x: int, offset_y: int
+):
+    """Downscale frame to (shrink_w, shrink_h) and place it at (offset_x, offset_y) on a black canvas."""
+    import cv2
+    import numpy as np
 
-    NIGHT = "night"
-    DAY = "day"
-    OUTDOORS = "outdoors"
-    CAMERA = "camera"
-
-
-class _BackgroundWorker(QObject):
-    """Runs in a QThread; reads camera/video/image, writes latest frame to widget, emits for setPixmap."""
-
-    frame_ready = Signal(object, int, int)  # (rgb_bytes, width, height)
-
-    def __init__(self, widget: "SimulatorBackgroundWidget") -> None:
-        super().__init__()
-        self._widget = widget
-        self._stop = False
-
-    def process_loop(self) -> None:
-        import cv2
-
-        interval = (
-            1.0 / BACKGROUND_VIDEO_FRAME_RATE
-            if BACKGROUND_VIDEO_FRAME_RATE > 0
-            else 1.0 / 5.0
-        )
-        while not self._stop:
-            try:
-                w, h = self._widget.resolution[0], self._widget.resolution[1]
-                background = None
-                with self._widget._capture_lock:
-                    preset = self._widget.current_preset
-                    cam = self._widget.camera_capture
-                    vid = self._widget.video_capture
-                    path = self._widget.background_path
-
-                if (
-                    preset == SimulatorBackgroundPreset.CAMERA
-                    and cam is not None
-                    and cam.isOpened()
-                ):
-                    ret, background = cam.read()
-                    if not ret or background is None:
-                        continue
-                    cam_height, cam_width = background.shape[:2]
-                    target_aspect = w / h
-                    cam_aspect = cam_width / cam_height
-                    if cam_aspect > target_aspect:
-                        new_height = h
-                        new_width = int(cam_width * (h / cam_height))
-                        background = cv2.resize(
-                            background,
-                            (new_width, new_height),
-                            interpolation=cv2.INTER_LINEAR,
-                        )
-                        crop_x = (new_width - w) // 2
-                        background = background[:, crop_x : crop_x + w]
-                    else:
-                        new_width = w
-                        new_height = int(cam_height * (w / cam_width))
-                        background = cv2.resize(
-                            background,
-                            (new_width, new_height),
-                            interpolation=cv2.INTER_LINEAR,
-                        )
-                        crop_y = (new_height - h) // 2
-                        background = background[crop_y : crop_y + h, :]
-                elif (
-                    preset
-                    in [
-                        SimulatorBackgroundPreset.DAY,
-                        SimulatorBackgroundPreset.NIGHT,
-                        SimulatorBackgroundPreset.OUTDOORS,
-                    ]
-                    and vid is not None
-                    and vid.isOpened()
-                ):
-                    ret, background = vid.read()
-                    if not ret or background is None:
-                        vid.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                        ret, background = vid.read()
-                        if not ret or background is None:
-                            continue
-                    video_height, video_width = background.shape[:2]
-                    target_aspect = w / h
-                    video_aspect = video_width / video_height
-                    if video_aspect > target_aspect:
-                        new_height = h
-                        new_width = int(video_width * (h / video_height))
-                        background = cv2.resize(
-                            background,
-                            (new_width, new_height),
-                            interpolation=cv2.INTER_LINEAR,
-                        )
-                        crop_x = (new_width - w) // 2
-                        background = background[:, crop_x : crop_x + w]
-                    else:
-                        new_width = w
-                        new_height = int(video_height * (w / video_width))
-                        background = cv2.resize(
-                            background,
-                            (new_width, new_height),
-                            interpolation=cv2.INTER_LINEAR,
-                        )
-                        crop_y = (new_height - h) // 2
-                        background = background[crop_y : crop_y + h, :]
-                elif path is not None and os.path.exists(path):
-                    background = cv2.imread(path)
-                    if background is not None:
-                        background = cv2.resize(
-                            background, (w, h), interpolation=cv2.INTER_LINEAR
-                        )
-
-                if background is not None:
-                    composite_rgb = cv2.cvtColor(background, cv2.COLOR_BGR2RGB)
-                    height, width = composite_rgb.shape[:2]
-                    with self._widget._frame_lock:
-                        self._widget._latest_frame = composite_rgb.copy()
-                    self.frame_ready.emit(composite_rgb.tobytes(), width, height)
-            except Exception as e:
-                log.debug(f"BackgroundWorker: {e}")
-            time.sleep(interval)
-
-    def stop(self) -> None:
-        self._stop = True
+    shrunk = cv2.resize(frame, (shrink_w, shrink_h), interpolation=cv2.INTER_AREA)
+    canvas = np.zeros_like(frame)
+    canvas[offset_y : offset_y + shrink_h, offset_x : offset_x + shrink_w] = shrunk
+    return canvas
 
 
-class SimulatorBackgroundWidget(QWidget):
-    """
-    A widget that displays only the simulator background (video/camera/image).
-    Used as the bottom layer in the merged window; the transparent app widget is drawn on top.
+def _apply_backlight_in_place(
+    frame, offset_x: int, offset_y: int, width: int, height: int
+) -> None:
+    """Lift pure-black pixels within the given rect to _BACKLIGHT_COLOR_BGR, in place."""
+    import cv2
+
+    region = frame[offset_y : offset_y + height, offset_x : offset_x + width]
+    black_mask = cv2.inRange(region, (0, 0, 0), (0, 0, 0))
+    kept = cv2.bitwise_and(region, region, mask=cv2.bitwise_not(black_mask))
+    lit = cv2.bitwise_and(_BACKLIGHT_LAYER_BGR, _BACKLIGHT_LAYER_BGR, mask=black_mask)
+    region[:] = cv2.bitwise_or(kept, lit)
+
+
+class _TranslucentPopup(QWidget):
+    """A Qt.Popup with a hand-painted translucent rounded frame.
+
+    QSS `background-color: rgba(...)` on a WA_TranslucentBackground
+    top-level window doesn't reliably blend on this platform — it renders
+    fully transparent instead. Painting the frame directly with QPainter
+    (which genuinely composites the alpha channel) does. Ordinary QSS
+    rgba() on non-toplevel child widgets (e.g. the popup's rows) is
+    unaffected by this and works normally.
     """
 
-    def __init__(
-        self,
-        framework_dir: str,
-        resolution: tuple[int, int] = (DISPLAY_RESOLUTION[0], DISPLAY_RESOLUTION[1]),
-    ) -> None:
-        super().__init__()
-        self.framework_dir = framework_dir
-        self.resolution = resolution
-        self.current_preset = SimulatorBackgroundPreset.NIGHT
-        self.camera_capture = None
-        self.video_capture = None
-        self.background_path = None
+    def __init__(self, fill_color: QColor, border_color: QColor, radius: int) -> None:
+        super().__init__(None, Qt.Popup)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self._fill_color = fill_color
+        self._border_color = border_color
+        self._radius = radius
+        self.on_resize = None
 
-        self.setFixedSize(self.resolution[0], self.resolution[1])
-        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if self.on_resize is not None:
+            QTimer.singleShot(0, self.on_resize)
 
-        self._capture_lock = threading.Lock()
-        self._frame_lock = threading.Lock()
-        self._latest_frame = None
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = self.rect().adjusted(0, 0, -1, -1)
 
-        self.background_label = QLabel(self)
-        self.background_label.setGeometry(0, 0, self.resolution[0], self.resolution[1])
-        self.background_label.setAlignment(Qt.AlignCenter)
-        self.background_label.setScaledContents(True)
+        gradient = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+        gradient.setColorAt(0.0, self._fill_color.lighter(145))
+        gradient.setColorAt(0.5, self._fill_color)
+        gradient.setColorAt(1.0, self._fill_color.darker(110))
+        painter.setPen(self._border_color)
+        painter.setBrush(gradient)
+        painter.drawRoundedRect(rect, self._radius, self._radius)
 
-        if OVERLAY_FRAME_RATE <= 0:
-            raise ValueError(
-                f"OVERLAY_FRAME_RATE must be positive, got {OVERLAY_FRAME_RATE}"
-            )
 
-        self._bg_worker = _BackgroundWorker(self)
-        self._bg_worker.frame_ready.connect(self._on_background_frame)
-        self._bg_thread = QThread(self)
-        self._bg_worker.moveToThread(self._bg_thread)
-        self._bg_thread.started.connect(self._bg_worker.process_loop)
-        self._bg_thread.start()
+class _GazeRemapOverlay(QWidget):
+    """Remaps mouse ("gaze") events from the shrunk/letterboxed composite
+    view back onto the real, full-size app widget underneath.
+    """
 
-        self._update_background_path()
-        video_presets = [
-            SimulatorBackgroundPreset.DAY,
-            SimulatorBackgroundPreset.NIGHT,
-            SimulatorBackgroundPreset.OUTDOORS,
-        ]
-        if self.current_preset in video_presets:
-            with self._capture_lock:
-                if not self._open_video():
-                    log.warning("Failed to open background simulator video")
+    def __init__(self, app_widget: QWidget, parent: QWidget = None) -> None:
+        super().__init__(parent)
+        self._app_widget = app_widget
+        self._scale_x = 1.0
+        self._scale_y = 1.0
+        self._offset = QPoint(0, 0)
+        self._gaze_target: Optional[QWidget] = None
+        self._gaze_chain: list[QWidget] = []
+        self.setMouseTracking(True)
+        self.set_active(False)
 
-        log.info("SimulatorBackgroundWidget initialized successfully.")
+    def set_transform(self, scale_x: float, scale_y: float, offset: QPoint) -> None:
+        self._scale_x = scale_x
+        self._scale_y = scale_y
+        self._offset = offset
 
-    def _on_background_frame(self, rgb_bytes: object, w: int, h: int) -> None:
-        """Main-thread slot: set background label pixmap from worker."""
-        try:
-            q_img = QImage(
-                rgb_bytes,
-                w,
-                h,
-                3 * w,
-                QImage.Format.Format_RGB888,
-            )
-            self.background_label.setPixmap(QPixmap.fromImage(q_img.copy()))
-        except Exception as e:
-            log.debug(f"Background frame apply: {e}")
+    def set_active(self, active: bool) -> None:
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, not active)
+        if not active:
+            self._clear_gaze_target()
 
-    def get_latest_background(self):
-        """Return a copy of the latest background frame (RGB numpy) or None. Thread-safe."""
-        import numpy as np
-
-        with self._frame_lock:
-            if self._latest_frame is not None:
-                return self._latest_frame.copy()
-        return None
-
-    def _update_background_path(self) -> None:
-        if self.current_preset == SimulatorBackgroundPreset.CAMERA:
-            self.background_path = None
-        elif self.current_preset == SimulatorBackgroundPreset.DAY:
-            self.background_path = os.path.join(
-                self.framework_dir,
-                OVERLAY_BACKGROUND_VIDEO_DAY_PATH,
-            )
-        elif self.current_preset == SimulatorBackgroundPreset.NIGHT:
-            self.background_path = os.path.join(
-                self.framework_dir,
-                OVERLAY_BACKGROUND_VIDEO_NIGHT_PATH,
-            )
-        elif self.current_preset == SimulatorBackgroundPreset.OUTDOORS:
-            self.background_path = os.path.join(
-                self.framework_dir,
-                OVERLAY_BACKGROUND_VIDEO_OUTDOORS_PATH,
-            )
-        else:
-            self.background_path = os.path.join(
-                self.framework_dir,
-                "overlay_backgrounds",
-                f"{self.current_preset.value}.png",
-            )
-
-    def _open_camera(self) -> bool:
-        if self.camera_capture is not None:
-            return True
-        try:
-            import cv2
-
-            self.camera_capture = cv2.VideoCapture(0)
-            if not self.camera_capture.isOpened():
-                log.error("Could not open camera")
-                self.camera_capture = None
-                return False
-            for _ in range(INITIAL_CAMERA_FRAMES_TO_DISCARD):
-                self.camera_capture.read()
-            log.info("Camera opened successfully")
-            return True
-        except Exception as e:
-            log.error(f"Error opening camera: {e}", exc_info=True)
-            self.camera_capture = None
-            return False
-
-    def _close_camera(self) -> None:
-        if self.camera_capture is not None:
-            try:
-                self.camera_capture.release()
-                self.camera_capture = None
-                log.info("Camera closed")
-            except Exception as e:
-                log.error(f"Error closing camera: {e}", exc_info=True)
-
-    def _open_video(self) -> bool:
-        if self.video_capture is not None:
-            return True
-        try:
-            import cv2
-
-            if self.background_path is None or not os.path.exists(self.background_path):
-                log.error(f"Video file not found: {self.background_path}")
-                return False
-            self.video_capture = cv2.VideoCapture(self.background_path)
-            if not self.video_capture.isOpened():
-                log.error(f"Could not open video: {self.background_path}")
-                self.video_capture = None
-                return False
-            log.info(f"Video opened successfully: {self.background_path}")
-            return True
-        except Exception as e:
-            log.error(f"Error opening video: {e}", exc_info=True)
-            self.video_capture = None
-            return False
-
-    def _close_video(self) -> None:
-        if self.video_capture is not None:
-            try:
-                self.video_capture.release()
-                self.video_capture = None
-                log.info("Video closed")
-            except Exception as e:
-                log.error(f"Error closing video: {e}", exc_info=True)
-
-    def change_background(self, preset: str) -> None:
-        try:
-            preset_enum = SimulatorBackgroundPreset(preset.lower())
-        except ValueError:
-            log.warning(f"Invalid background preset: {preset}")
+    def _send_leave(self, target: QWidget) -> None:
+        if not shiboken6.isValid(target):
             return
+        QApplication.sendEvent(target, QEvent(QEvent.Type.Leave))
 
-        video_presets = [
-            SimulatorBackgroundPreset.DAY,
-            SimulatorBackgroundPreset.NIGHT,
-            SimulatorBackgroundPreset.OUTDOORS,
-        ]
+    def _clear_gaze_target(self) -> None:
+        chain = self._gaze_chain
+        self._gaze_chain = []
+        self._gaze_target = None
+        for widget in chain:
+            self._send_leave(widget)
 
-        with self._capture_lock:
-            if (
-                self.current_preset == SimulatorBackgroundPreset.CAMERA
-                and preset_enum != SimulatorBackgroundPreset.CAMERA
-            ):
-                self._close_camera()
+    def _resolve_chain(self, pos: QPoint) -> list:
+        target = self._resolve_target(pos)
+        if target is None:
+            return []
+        chain = []
+        widget = target
+        while widget is not None and shiboken6.isValid(widget):
+            chain.append(widget)
+            if widget is self._app_widget:
+                break
+            widget = widget.parentWidget()
+        return chain
 
-            if (
-                self.current_preset in video_presets
-                and preset_enum not in video_presets
-            ):
-                self._close_video()
+    def _real_point(self, pos: QPoint) -> QPoint:
+        real_x = (pos.x() - self._offset.x()) / self._scale_x
+        real_y = (pos.y() - self._offset.y()) / self._scale_y
+        return QPoint(round(real_x), round(real_y))
 
-            if (
-                self.current_preset in video_presets
-                and preset_enum in video_presets
-                and self.current_preset != preset_enum
-            ):
-                self._close_video()
+    def _resolve_target(self, pos: QPoint) -> Optional[QWidget]:
+        if not shiboken6.isValid(self._app_widget):
+            return None
+        real_point = self._real_point(pos)
+        if not (
+            0 <= real_point.x() < self._app_widget.width()
+            and 0 <= real_point.y() < self._app_widget.height()
+        ):
+            return None
+        raw_hit = self._app_widget.childAt(real_point)
+        target = raw_hit or self._app_widget
+        while (
+            target is not self._app_widget
+            and shiboken6.isValid(target)
+            and not target.isEnabled()
+        ):
+            target = target.parentWidget()
+        return target
 
-            if (
-                preset_enum == SimulatorBackgroundPreset.CAMERA
-                and self.current_preset != SimulatorBackgroundPreset.CAMERA
-            ):
-                if not self._open_camera():
-                    log.error("Failed to open camera, keeping current preset")
-                    return
+    def _forward(self, target: QWidget, event: QMouseEvent) -> None:
+        if not (shiboken6.isValid(target) and shiboken6.isValid(self._app_widget)):
+            return
+        real_point = self._real_point(event.position().toPoint())
+        global_point = self._app_widget.mapToGlobal(real_point)
+        widget = target
+        while widget is not None and shiboken6.isValid(widget):
+            local_point = widget.mapFrom(self._app_widget, real_point)
+            forwarded = QMouseEvent(
+                event.type(),
+                QPointF(local_point),
+                QPointF(global_point),
+                event.button(),
+                event.buttons(),
+                event.modifiers(),
+            )
+            QApplication.sendEvent(widget, forwarded)
+            if forwarded.isAccepted() or widget is self._app_widget:
+                return
+            widget = widget.parentWidget()
 
-            if preset_enum in video_presets and (
-                self.current_preset not in video_presets
-                or self.current_preset != preset_enum
-            ):
-                self.current_preset = preset_enum
-                self._update_background_path()
-                if not self._open_video():
-                    log.error("Failed to open video, keeping current preset")
-                    return
-            else:
-                self.current_preset = preset_enum
-                self._update_background_path()
+    def _send_enter(self, target: QWidget, real_point: QPoint) -> None:
+        local_point = target.mapFrom(self._app_widget, real_point)
+        global_point = self._app_widget.mapToGlobal(real_point)
+        enter_event = QEnterEvent(
+            QPointF(local_point), QPointF(real_point), QPointF(global_point)
+        )
+        QApplication.sendEvent(target, enter_event)
 
-        log.info(f"Background changed to: {preset}")
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        pos = event.position().toPoint()
+        new_chain = self._resolve_chain(pos)
+        new_target = new_chain[0] if new_chain else None
+        if new_target is not self._gaze_target:
+            old_chain = self._gaze_chain
+            old_set = {id(w) for w in old_chain}
+            new_set = {id(w) for w in new_chain}
+            for widget in old_chain:
+                if id(widget) not in new_set:
+                    self._send_leave(widget)
+            real_point = self._real_point(pos)
+            for widget in reversed(new_chain):
+                if id(widget) not in old_set and shiboken6.isValid(widget):
+                    self._send_enter(widget, real_point)
+            self._gaze_chain = new_chain
+            self._gaze_target = new_target
+        if new_target is not None:
+            self._forward(new_target, event)
 
-    def stop(self) -> None:
-        """Stop background worker and release camera/video. Call when window is closed or no longer needed."""
-        if hasattr(self, "_bg_worker") and self._bg_worker is not None:
-            self._bg_worker.stop()
-        if hasattr(self, "_bg_thread") and self._bg_thread.isRunning():
-            self._bg_thread.quit()
-            self._bg_thread.wait(3000)
-        with self._capture_lock:
-            self._close_camera()
-            self._close_video()
+    def _forward_to_gaze_target(self, event: QMouseEvent) -> None:
+        target = self._gaze_target
+        if target is not None and shiboken6.isValid(target):
+            self._forward(target, event)
+        elif target is not None:
+            self._gaze_target = None
+            self._gaze_chain = []
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        self._forward_to_gaze_target(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        self._forward_to_gaze_target(event)
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        self._forward_to_gaze_target(event)
+
+    def leaveEvent(self, event) -> None:
+        self._clear_gaze_target()
+        super().leaveEvent(event)
 
 
 class SimulatorRunApp(QMainWindow):
@@ -713,6 +628,9 @@ class SimulatorRunApp(QMainWindow):
             )
             self.background_widget.setParent(content_area)
             self.background_widget.setGeometry(0, 0, content_w, content_h)
+            self._upload_dir = os.path.join(
+                framework_dir, "assets", "tmp", "background_uploads"
+            )
 
             app_widget.set_env_background_color("black")
             app_widget.set_app_background_color("black")
@@ -729,6 +647,16 @@ class SimulatorRunApp(QMainWindow):
             self._composite_label.setScaledContents(True)
             self._composite_label.setAttribute(Qt.WA_TransparentForMouseEvents)
             self._composite_label.raise_()
+
+            self._gaze_overlay = _GazeRemapOverlay(app_widget, content_area)
+            self._gaze_overlay.setGeometry(0, 0, content_w, content_h)
+            self._gaze_overlay.set_transform(
+                UI_SHRINK_WIDTH / content_w,
+                UI_SHRINK_HEIGHT / content_h,
+                QPoint(UI_SHRINK_OFFSET_X, UI_SHRINK_OFFSET_Y),
+            )
+            self._gaze_overlay.set_active(ENABLE_UI_SHRINK)
+            self._gaze_overlay.raise_()
 
             self._composite_timer = QTimer(self)
             self._composite_timer.timeout.connect(self._update_composite)
@@ -773,72 +701,72 @@ class SimulatorRunApp(QMainWindow):
 
             self._mode_buttons_glass = """
                 QPushButton {
-                    background-color: rgba(255, 255, 255, 0.12);
-                    color: rgba(255, 255, 255, 0.95);
-                    border: 1px solid rgba(255, 255, 255, 0.25);
-                    border-radius: 12px;
+                    background-color: rgba(255, 255, 255, 0.06);
+                    color: rgba(255, 255, 255, 0.85);
+                    border: none;
+                    border-radius: 8px;
                     font-size: 13px;
-                    font-weight: 600;
+                    font-weight: 500;
                     padding: 6px 14px;
                 }
                 QPushButton:hover {
-                    background-color: rgba(255, 255, 255, 0.18);
-                    border: 1px solid rgba(255, 255, 255, 0.35);
+                    background-color: rgba(40, 40, 40, 0.92);
                 }
-                QPushButton:pressed {
-                    background-color: rgba(255, 255, 255, 0.22);
-                    border: 1px solid rgba(255, 255, 255, 0.4);
+                QPushButton::menu-indicator {
+                    image: none;
+                    width: 0px;
                 }
             """
             self._mode_buttons_active = """
                 QPushButton {
-                    background-color: rgba(255, 255, 255, 0.28);
+                    background-color: rgba(48, 48, 48, 0.94);
                     color: white;
-                    border: 1px solid rgba(255, 255, 255, 0.6);
-                    border-radius: 12px;
+                    border: none;
+                    border-radius: 8px;
                     font-size: 13px;
-                    font-weight: 600;
+                    font-weight: 700;
                     padding: 6px 14px;
                 }
                 QPushButton:hover {
-                    background-color: rgba(255, 255, 255, 0.32);
-                    border: 1px solid rgba(255, 255, 255, 0.7);
+                    background-color: rgba(62, 62, 62, 0.94);
                 }
-                QPushButton:pressed {
-                    background-color: rgba(255, 255, 255, 0.35);
-                    border: 1px solid rgba(255, 255, 255, 0.8);
+                QPushButton::menu-indicator {
+                    image: none;
+                    width: 0px;
                 }
             """
-
             self._active_mode = "night"
-            self._mode_buttons = []
+
+            tint_button = QPushButton("Tint", button_container)
+            tint_button.setFixedSize(70, 38)
+            tint_button.setStyleSheet(self._mode_buttons_glass)
+            tint_button.clicked.connect(self._on_tint_toggle_clicked)
+            self._tint_button = tint_button
+            self._tint_button_hidden_for_raw = False
+            self._update_tint_button_style()
+
+            background_popup = _TranslucentPopup(
+                fill_color=QColor(0, 0, 0, 140),
+                border_color=QColor(255, 255, 255, 60),
+                radius=8,
+            )
+            background_popup.setObjectName("backgroundPopup")
+            background_popup.setMinimumWidth(150)
+            popup_layout = QVBoxLayout(background_popup)
+            popup_layout.setContentsMargins(4, 4, 4, 4)
+            popup_layout.setSpacing(0)
+            self._background_popup = background_popup
+            self._background_popup_layout = popup_layout
+
+            background_button = QPushButton("Background", button_container)
+            background_button.setFixedSize(140, 38)
+            background_button.setStyleSheet(self._mode_buttons_glass)
+            background_button.clicked.connect(self._show_background_popup)
+            self._background_button = background_button
 
             button_layout.addStretch()
-            raw_button = QPushButton("Raw", button_container)
-            raw_button.setFixedSize(92, 42)
-            raw_button.setProperty("mode_id", "raw")
-            raw_button.clicked.connect(self._on_raw_button_clicked)
-            self._mode_buttons.append(("raw", raw_button))
-            button_layout.addWidget(raw_button)
-
-            self._raw_tooltip = self._make_raw_tooltip()
-            self._raw_tooltip_button = raw_button
-            raw_button.installEventFilter(self)
-
-            self.background_buttons = []
-            for preset_enum in SimulatorBackgroundPreset:
-                preset_str = preset_enum.value
-                button = QPushButton(preset_str.capitalize(), button_container)
-                button.setFixedSize(92, 42)
-                button.setProperty("mode_id", preset_str)
-                button.clicked.connect(
-                    lambda checked, p=preset_str: self.change_background(p)
-                )
-                self.background_buttons.append(button)
-                self._mode_buttons.append((preset_str, button))
-                button_layout.addWidget(button)
-
-            button_layout.addStretch()
+            button_layout.addWidget(tint_button)
+            button_layout.addWidget(background_button)
             button_container.setFixedHeight(58)
             layout.addWidget(button_container)
 
@@ -846,6 +774,7 @@ class SimulatorRunApp(QMainWindow):
 
             self.setCentralWidget(container)
             set_custom_circle_cursor(self._app_widget)
+            set_custom_circle_cursor(self._gaze_overlay)
 
             log.info("SimulatorRunApp initialized successfully.")
         except Exception as e:
@@ -1049,6 +978,9 @@ class SimulatorRunApp(QMainWindow):
                 content_area.setStyleSheet("background-color: #282936;")
             self._app_widget.raise_()
             self._composite_label.raise_()
+            gaze_overlay = getattr(self, "_gaze_overlay", None)
+            if gaze_overlay is not None:
+                gaze_overlay.set_active(False)
             self._app_widget.show()
             interval = int(1000 / OVERLAY_FRAME_RATE) if OVERLAY_FRAME_RATE > 0 else 33
             self._raw_update_timer.start(interval)
@@ -1075,91 +1007,319 @@ class SimulatorRunApp(QMainWindow):
             self.background_widget.stackUnder(self._app_widget)
             self._app_widget.stackUnder(self._composite_label)
             self._composite_label.raise_()
+            gaze_overlay = getattr(self, "_gaze_overlay", None)
+            if gaze_overlay is not None:
+                gaze_overlay.set_active(ENABLE_UI_SHRINK)
+                gaze_overlay.raise_()
             interval = int(1000 / OVERLAY_FRAME_RATE) if OVERLAY_FRAME_RATE > 0 else 33
             self._composite_timer.start(interval)
             QTimer.singleShot(0, self._update_composite)
             self._composite_label.update()
             QApplication.processEvents()
 
-    def _toggle_raw_view(self) -> None:
-        self._set_raw_view(not self._raw_mode)
-
-    def _make_raw_tooltip(self) -> QFrame:
-        tip = QFrame(self)
-        tip.setWindowFlags(Qt.ToolTip | Qt.FramelessWindowHint)
-        tip.setAttribute(Qt.WA_TranslucentBackground, True)
-        tip.setStyleSheet("""
-            QFrame {
-                background-color: rgba(30, 30, 30, 0.85);
-                border: 1px solid rgba(255, 255, 255, 0.18);
-                border-radius: 12px;
-            }
-        """)
-        tip_label = QLabel(tip)
-        tip_label.setWordWrap(True)
-        tip_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        tip_label.setText(RAW_MODE_TOOLTIP_TEXT)
-        tip_label.setStyleSheet("""
-            QLabel {
-                color: rgba(255, 255, 255, 0.92);
-                font-size: 14px;
-                line-height: 1.35;
-                padding: 18px 12px;
-            }
-        """)
-        tip_label.setMinimumWidth(260)
-        tip_label.setMaximumWidth(320)
-        tip_layout = QVBoxLayout(tip)
-        tip_layout.setContentsMargins(0, 0, 0, 0)
-        tip_layout.addWidget(tip_label)
-        tip.adjustSize()
-        tip.hide()
-        return tip
-
-    def eventFilter(self, obj, event) -> bool:
-        if obj is getattr(self, "_raw_tooltip_button", None):
-            if event.type() == QEvent.Type.Enter:
-                tip = getattr(self, "_raw_tooltip", None)
-                if tip is not None:
-                    tip.adjustSize()
-                    btn = self._raw_tooltip_button
-                    global_pos = btn.mapToGlobal(QPoint(0, 0))
-                    x = global_pos.x() + (btn.width() - tip.width()) // 2
-                    y = global_pos.y() - tip.height() - 0.1
-                    tip.move(x, y)
-                    tip.show()
-                    tip.raise_()
-            elif event.type() == QEvent.Type.Leave:
-                tip = getattr(self, "_raw_tooltip", None)
-                if tip is not None:
-                    tip.hide()
-        return super().eventFilter(obj, event)
-
     def _update_mode_button_styles(self) -> None:
-        if not hasattr(self, "_mode_buttons"):
-            return
-        for mode_id, btn in self._mode_buttons:
-            style = (
-                self._mode_buttons_active
-                if mode_id == self._active_mode
-                else self._mode_buttons_glass
+        is_raw = self._active_mode == "raw"
+        background_button = getattr(self, "_background_button", None)
+        if background_button is not None:
+            background_button.setStyleSheet(
+                self._mode_buttons_glass if is_raw else self._mode_buttons_active
             )
-            btn.setStyleSheet(style)
-            btn.setAutoFillBackground(False)
-            btn.setFlat(False)
+        self._update_tint_button_style()
+        self._update_tint_button_visibility(is_raw)
 
-    def _on_raw_button_clicked(self) -> None:
-        self._active_mode = "raw"
-        self._update_mode_button_styles()
-        self._toggle_raw_view()
+    def _update_tint_button_visibility(self, is_raw: bool) -> None:
+        """Fade Tint out while Raw is active (tint has no effect in raw view)."""
+        tint_button = getattr(self, "_tint_button", None)
+        if tint_button is None:
+            return
+        previous = getattr(self, "_tint_button_hidden_for_raw", None)
+        if previous == is_raw:
+            return
+        self._tint_button_hidden_for_raw = is_raw
+        tint_button.setEnabled(not is_raw)
+        if is_raw:
+            fade_out(tint_button, duration=150)
+        else:
+            fade_in(tint_button, duration=150)
+
+    def _on_raw_option_selected(self) -> None:
+        popup = getattr(self, "_background_popup", None)
+        if popup is not None:
+            popup.hide()
+        self._set_raw_view(True)
+
+    def _on_tint_toggle_clicked(self) -> None:
+        global ENABLE_TINT
+        ENABLE_TINT = not ENABLE_TINT
+        self._update_tint_button_style()
+
+    def _update_tint_button_style(self) -> None:
+        tint_button = getattr(self, "_tint_button", None)
+        if tint_button is None:
+            return
+        is_raw = getattr(self, "_active_mode", None) == "raw"
+        tint_button.setStyleSheet(
+            self._mode_buttons_active
+            if (ENABLE_TINT and not is_raw)
+            else self._mode_buttons_glass
+        )
 
     def change_background(self, preset: str) -> None:
+        popup = getattr(self, "_background_popup", None)
+        if popup is not None:
+            popup.hide()
         if hasattr(self, "_raw_mode") and self._raw_mode:
             self._set_raw_view(False)
         self._active_mode = preset
         self._update_mode_button_styles()
         if self.background_widget is not None:
             self.background_widget.change_background(preset)
+
+    def _show_background_popup(self) -> None:
+        self._rebuild_background_popup()
+        popup = self._background_popup
+        button = self._background_button
+        button_top = button.mapToGlobal(QPoint(0, 0))
+
+        def anchor() -> None:
+            popup.move(button_top.x(), button_top.y() - popup.height() - 4)
+
+        popup.on_resize = anchor
+        popup.layout().activate()
+        popup.adjustSize()
+        anchor()
+        popup.show()
+
+    def _rebuild_background_popup(self) -> None:
+        """Rebuild the Background popup: fixed presets, saved uploads (v1, v2, ...), then Upload.
+
+        Every row — presets, uploads, and Upload itself — is built by
+        _make_menu_row so the whole popup shares one consistent style, and
+        clicks land on plain QPushButtons with no QMenu mouse-grab involved.
+        """
+        layout = self._background_popup_layout
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        layout.addWidget(
+            self._make_menu_row(
+                "None (Raw Frames)",
+                self._active_mode == "raw",
+                self._on_raw_option_selected,
+                tooltip=RAW_MODE_TOOLTIP_TEXT,
+            )
+        )
+        layout.addWidget(self._make_menu_separator())
+
+        for preset_enum in SimulatorBackgroundPreset:
+            if preset_enum == SimulatorBackgroundPreset.CUSTOM:
+                continue
+            preset_str = preset_enum.value
+            is_active = preset_str == self._active_mode
+            layout.addWidget(
+                self._make_menu_row(
+                    preset_str.capitalize(),
+                    is_active,
+                    lambda p=preset_str: self.change_background(p),
+                )
+            )
+
+        uploads = _list_uploaded_backgrounds(self._upload_dir)
+        if uploads:
+            layout.addWidget(self._make_menu_separator())
+            for version, path, is_video in uploads:
+                mode_id = f"custom:{version}"
+                is_active = mode_id == self._active_mode
+                layout.addWidget(
+                    self._make_menu_row(
+                        f"v{version}",
+                        is_active,
+                        lambda m=mode_id, p=path, v=is_video: (
+                            self._on_select_uploaded_background(m, p, v)
+                        ),
+                        show_delete=True,
+                        on_delete=lambda m=mode_id, p=path: (
+                            self._on_delete_uploaded_background(m, p)
+                        ),
+                    )
+                )
+
+        layout.addWidget(self._make_menu_separator())
+        layout.addWidget(
+            self._make_menu_row("Upload...", False, self._on_upload_background_clicked)
+        )
+
+    def _make_menu_separator(self) -> QWidget:
+        separator = QWidget(self._background_popup)
+        separator.setAttribute(Qt.WA_StyledBackground, True)
+        separator.setFixedHeight(1)
+        separator.setStyleSheet("background-color: rgba(255, 255, 255, 0.15);")
+        # Direct child of the translucent popup — needs its own painted
+        # (nonzero-alpha) background or it's a hole through to the desktop.
+        wrapper = QWidget(self._background_popup)
+        wrapper.setAttribute(Qt.WA_StyledBackground, True)
+        wrapper.setStyleSheet("background-color: rgba(255, 255, 255, 0.06);")
+        wrapper_layout = QVBoxLayout(wrapper)
+        wrapper_layout.setContentsMargins(8, 4, 8, 4)
+        wrapper_layout.addWidget(separator)
+        return wrapper
+
+    def _make_menu_row(
+        self,
+        label: str,
+        is_active: bool,
+        on_select,
+        show_delete: bool = False,
+        on_delete=None,
+        tooltip: str = "",
+    ) -> QWidget:
+        """One uniformly-styled popup row: optional checkmark + label, optional '-' delete button."""
+        row = QWidget(self._background_popup)
+        row.setAttribute(Qt.WA_StyledBackground, True)
+        row.setObjectName("menuRow")
+        row.setStyleSheet("""
+            QWidget#menuRow {
+                background-color: rgba(255, 255, 255, 0.06);
+            }
+            QWidget#menuRow:hover {
+                background-color: rgba(40, 40, 40, 0.92);
+            }
+        """)
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(16, 6, 12, 6)
+        row_layout.setSpacing(8)
+
+        check_label = QLabel("✓" if is_active else "", row)
+        check_label.setFixedWidth(14)
+        check_label.setStyleSheet(
+            "QLabel { color: white; font-weight: 700; background: transparent; }"
+        )
+        row_layout.addWidget(check_label)
+
+        select_button = QPushButton(label, row)
+        select_button.setFlat(True)
+        select_button.setCursor(Qt.PointingHandCursor)
+        if tooltip:
+            select_button.setToolTip(tooltip)
+        select_button.setStyleSheet(
+            "QPushButton { border: none; background: transparent; text-align: left;"
+            + (
+                " color: white; font-weight: 700; }"
+                if is_active
+                else " color: rgba(255, 255, 255, 0.85); font-weight: 500; }"
+            )
+        )
+        # QPushButton.clicked emits a bool; discard it so on_select/on_delete
+        # (defined as zero-arg lambdas with bound defaults) run unmodified.
+        select_button.clicked.connect(lambda checked=False: on_select())
+        row_layout.addWidget(select_button, 1)
+
+        if show_delete:
+            delete_button = QPushButton("-", row)
+            delete_button.setFlat(True)
+            delete_button.setFixedWidth(20)
+            delete_button.setCursor(Qt.PointingHandCursor)
+            delete_button.setStyleSheet(
+                "QPushButton { border: none; background: transparent;"
+                " color: rgba(255, 255, 255, 0.5); font-weight: 700; }"
+                "QPushButton:hover { color: #FF6B6B; }"
+            )
+            delete_button.clicked.connect(lambda checked=False: on_delete())
+            row_layout.addWidget(delete_button)
+
+        return row
+
+    def _on_select_uploaded_background(
+        self, mode_id: str, path: str, is_video: bool
+    ) -> None:
+        self._background_popup.hide()
+        if not os.path.exists(path):
+            log.warning(f"Uploaded background missing on disk: {path}")
+            return
+        if hasattr(self, "_raw_mode") and self._raw_mode:
+            self._set_raw_view(False)
+        if self.background_widget is not None:
+            self.background_widget.set_custom_background(path, is_video)
+        self._active_mode = mode_id
+        self._update_mode_button_styles()
+
+    def _on_delete_uploaded_background(self, mode_id: str, path: str) -> None:
+        self._background_popup.hide()
+        if self._active_mode == mode_id:
+            # Switch away first so any open video capture releases the file
+            # before we unlink it (required on Windows; harmless elsewhere).
+            self._active_mode = SimulatorBackgroundPreset.NIGHT.value
+            if self.background_widget is not None:
+                self.background_widget.change_background(self._active_mode)
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except OSError as e:
+            log.error(f"Failed to delete uploaded background {path}: {e}")
+            return
+        self._update_mode_button_styles()
+
+    def _on_upload_background_clicked(self) -> None:
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Choose background image or video",
+            "",
+            "Media files (*.png *.jpg *.jpeg *.bmp *.webp *.mp4 *.mov *.avi *.mkv *.webm *.m4v)",
+        )
+        if not file_path:
+            self._update_mode_button_styles()
+            return
+        self._start_background_upload(file_path)
+
+    def _start_background_upload(self, file_path: str) -> None:
+        if self.background_widget is None:
+            return
+        resolution = self.background_widget.resolution
+
+        self._upload_progress = QProgressDialog(
+            "Compressing background…", None, 0, 0, self
+        )
+        self._upload_progress.setWindowModality(Qt.WindowModal)
+        self._upload_progress.setCancelButton(None)
+        self._upload_progress.setMinimumDuration(0)
+        self._upload_progress.show()
+
+        self._upload_thread = QThread(self)
+        self._upload_worker = _BackgroundUploadWorker(
+            file_path, self._upload_dir, resolution
+        )
+        self._upload_worker.moveToThread(self._upload_thread)
+        self._upload_thread.started.connect(self._upload_worker.run)
+        self._upload_worker.finished.connect(self._on_background_upload_finished)
+        self._upload_thread.start()
+
+    def _on_background_upload_finished(
+        self, dest_path: str, version: int, is_video: bool, success: bool
+    ) -> None:
+        if getattr(self, "_upload_progress", None) is not None:
+            self._upload_progress.close()
+            self._upload_progress = None
+        upload_thread = getattr(self, "_upload_thread", None)
+        if upload_thread is not None:
+            upload_thread.quit()
+            upload_thread.wait(3000)
+            self._upload_thread = None
+        self._upload_worker = None
+
+        if not success:
+            log.error(f"Background upload failed for: {dest_path}")
+            self._update_mode_button_styles()
+            return
+
+        if hasattr(self, "_raw_mode") and self._raw_mode:
+            self._set_raw_view(False)
+        if self.background_widget is not None:
+            self.background_widget.set_custom_background(dest_path, is_video)
+        self._active_mode = f"custom:{version}"
+        self._update_mode_button_styles()
 
     def closeEvent(self, event) -> None:
         if hasattr(self, "_composite_timer") and self._composite_timer.isActive():
@@ -1176,4 +1336,8 @@ class SimulatorRunApp(QMainWindow):
             if self._blend_thread.isRunning():
                 self._blend_thread.quit()
                 self._blend_thread.wait(5000)
+        upload_thread = getattr(self, "_upload_thread", None)
+        if upload_thread is not None and upload_thread.isRunning():
+            upload_thread.quit()
+            upload_thread.wait(5000)
         super().closeEvent(event)

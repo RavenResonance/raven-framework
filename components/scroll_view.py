@@ -657,6 +657,7 @@ class ScrollView(QWidget):
             outline_fade_duration_ms=self.pagination_outline_fade_duration_ms,
             outline_fade_curve=self.pagination_outline_fade_curve,
         )
+        self.pagination_container.setObjectName("pagination_container")
 
         self.indicators = []
         log.info(f"Setting up pagination with {self.total_pages} pages")
@@ -668,6 +669,7 @@ class ScrollView(QWidget):
                 dwell_time=0.01,
             )
             circle_icon.setParent(self.pagination_container)
+            circle_icon.setObjectName(f"pagination_dot_{i}")
             circle_icon.on_clicked(self._on_pagination_click, i)
             circle_icon.show()
             self.indicators.append(circle_icon)

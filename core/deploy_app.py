@@ -12,6 +12,14 @@ Deploy Raven applications: build .rav packages and optional CLI upload.
 Compiles or copies Python sources, copies assets, zips the tree, provides
 ``deploy_app`` for local package creation, and ``handle_cli_deploy`` for
 ``deploy`` / ``deploy-pyc`` command-line flows.
+
+Two packaging modes:
+  ``deploy`` (compile_pyc=False, default) — ships plain .py source. Works on
+    any local Python >=3.10; no version pin needed.
+  ``deploy-pyc`` (compile_pyc=True) — pre-compiles to .pyc locally for
+    lightweight IP protection. .pyc bytecode is tied to the exact major.minor
+    CPython version that compiled it, so this mode requires the local Python
+    to match PYTHON_VERSION_ON_RAVEN_DEVICE exactly (major.minor).
 """
 
 import glob
@@ -290,19 +298,26 @@ def create_rav_package(
             log.info("Cleaned up temporary files")
 
 
-def deploy_app(app_name: str = "dev", compile_pyc: bool = True) -> Optional[str]:
+def deploy_app(app_name: str = "dev", compile_pyc: bool = False) -> Optional[str]:
     version = (
         f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
     )
-    if version != PYTHON_VERSION_ON_RAVEN_DEVICE:
-        error_msg = (
-            f"FATAL ERROR: Make sure python version is {PYTHON_VERSION_ON_RAVEN_DEVICE}"
-        )
-        log.error(error_msg)
-        print(f"ERROR: {error_msg}", file=sys.stderr)
-        print(f"Current Python version: {version}", file=sys.stderr)
-        return None
     if compile_pyc:
+        # .pyc bytecode is tied to the exact major.minor CPython version that
+        # compiled it — a mismatch fails to import on-device. This check only
+        # applies here: plain source (compile_pyc=False, the default) has no
+        # such constraint and runs on any Python >=3.10.
+        minor_version = f"{sys.version_info.major}.{sys.version_info.minor}"
+        if minor_version != PYTHON_VERSION_ON_RAVEN_DEVICE:
+            error_msg = (
+                f"FATAL ERROR: deploy-pyc requires local Python {PYTHON_VERSION_ON_RAVEN_DEVICE} "
+                f"to match the device (compiled bytecode is version-locked); you have "
+                f"{minor_version}. Use plain 'deploy' (source, no version pin needed) instead, "
+                f"or switch your local Python to {PYTHON_VERSION_ON_RAVEN_DEVICE}."
+            )
+            log.error(error_msg)
+            print(f"ERROR: {error_msg}", file=sys.stderr)
+            return None
         log.info(f"Deploying app with Python version: {version} and compiling to .pyc")
         print(f"Using Python version: {version}", file=sys.stdout)
     old_files = glob.glob(os.path.join(".", "*.rav"))
