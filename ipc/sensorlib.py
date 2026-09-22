@@ -40,7 +40,8 @@ log = get_logger("Sensorlib")
 # Daemon socket paths  (must match ravend/protocol.py)
 # ---------------------------------------------------------------------------
 
-_SOCKET_DIR = load_config().get("ipc", {}).get("RAVEND_SOCKET_DIR", "/run/ravend")
+_config = load_config()
+_SOCKET_DIR = _config["ipc"]["RAVEND_SOCKET_DIR"]
 _AUTH_SOCKET = f"{_SOCKET_DIR}/auth.sock"
 _CAMERA_SOCKET = f"{_SOCKET_DIR}/camera.sock"
 _MICROPHONE_SOCKET = f"{_SOCKET_DIR}/microphone.sock"
