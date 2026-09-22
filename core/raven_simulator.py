@@ -46,6 +46,7 @@ from ..helpers.animation_utils import fade_in, fade_out
 from ..helpers.logger import get_logger
 from ..helpers.utils import qpixmap_to_rgb_bytes
 from ..helpers.utils_light import load_config, set_custom_circle_cursor
+from .waveguide_halo import apply_waveguide_halo
 from .simulator_background import (
     SimulatorBackgroundPreset,
     SimulatorBackgroundWidget,
@@ -100,7 +101,10 @@ TOTAL_CIE_Y = CIE_R_Y + CIE_G_Y + CIE_B_Y
 _WEIGHT_R = CIE_R_Y / TOTAL_CIE_Y
 _WEIGHT_G = CIE_G_Y / TOTAL_CIE_Y
 _WEIGHT_B = CIE_B_Y / TOTAL_CIE_Y
-CONSIDER_POINT_SPREAD = True
+CONSIDER_POINT_SPREAD = False
+CONSIDER_WAVEGUIDE_HALO = _config["simulator"]["CONSIDER_WAVEGUIDE_HALO"]
+HALO_RADIUS = _config["simulator"]["HALO_RADIUS"]
+HALO_STRENGTH = _config["simulator"]["HALO_STRENGTH"]
 
 
 def _build_srgb_linear_luts():
@@ -261,12 +265,21 @@ def blend_frame(bg_bgr, snapshot_bgr):
     bi = cv2.LUT(bg_bgr, _LUT_SRGB_TO_LIN_BYTE)
     si = cv2.LUT(snapshot_bgr, _LUT_SRGB_TO_LIN_BYTE)
 
+    # Raven's current calibrated PSF remains untouched and disabled by default.
+    # The optional halo below is a separate perceptual approximation: sharp HUD
+    # core + broad low-energy light leak, applied in linear-light byte space.
+    use_linear_demand = False
     if CONSIDER_POINT_SPREAD:
-        # Step 2 & 3
         si = cv2.filter2D(si, -1, POINT_SPREAD_KERNEL)
+        use_linear_demand = True
+
+    if CONSIDER_WAVEGUIDE_HALO:
+        si = apply_waveguide_halo(si, HALO_RADIUS, HALO_STRENGTH)
+        use_linear_demand = True
+
+    if use_linear_demand:
         d = _LUT_D_3D_LINEAR[si[:, :, 0], si[:, :, 1], si[:, :, 2]]
     else:
-        # Step 3
         d = _LUT_D_3D[
             snapshot_bgr[:, :, 0],
             snapshot_bgr[:, :, 1],
