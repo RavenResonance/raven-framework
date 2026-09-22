@@ -51,7 +51,12 @@
     "OVERLAY_BACKGROUND_VIDEO_NIGHT_PATH": "assets/overlay_background_videos/night.mp4",
     "OVERLAY_BACKGROUND_VIDEO_OUTDOORS_PATH": "assets/overlay_background_videos/outdoor.mp4",
     "RAW_MODE_TOOLTIP_TEXT": "The raw app that will render on Raven Prism. Use other modes for previewing how it will blend with background, note that performance other modes is relatively less due to real time blending.",
-    "PRINT_SIMULATOR_PERFORMANCE": false
+    "PRINT_SIMULATOR_PERFORMANCE": false,
+    "FIXED_BACKGROUND_TINT_FACTOR": 0.4,
+    "UI_SHRINK_WIDTH": 600,
+    "UI_SHRINK_HEIGHT": 600,
+    "UI_SHRINK_OFFSET_X": 85,
+    "UI_SHRINK_OFFSET_Y": 60
   },
   "logger": {
     "LOG_NAME": "raven_log",
