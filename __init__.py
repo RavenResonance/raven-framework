@@ -77,6 +77,7 @@ def __getattr__(name: str) -> Any:
           get_frame_from_video, base64_to_image, image_to_base64
         - Heavy UI components: WebViewer, OpenAiHelper, MediaViewer, ModelViewer
         - Peripherals: Camera, Microphone, Speaker, IMU, EyeControl, ClickButton, HandGestureDetector
+        - Identity: get_username
     """
     # UI components (Qt-backed) — deferred so the light import path stays Qt-free
     if name in _COMPONENTS:
@@ -168,6 +169,10 @@ def __getattr__(name: str) -> Any:
         from .storage import StorageManager
 
         return StorageManager
+    elif name == "get_username":
+        from .core.platform import get_username
+
+        return get_username
 
     raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
 
@@ -211,4 +216,5 @@ __all__ = [
     "get_frame_from_video",
     "base64_to_image",
     "image_to_base64",
+    "get_username",
 ]

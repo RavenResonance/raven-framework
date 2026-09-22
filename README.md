@@ -1152,6 +1152,7 @@ Raven Prism v1 hardware specifications:
 
 * **Operating System:** RavenOS (Linux-based)
 * **Processor:** Quad-core 64-bit ARM processor
+* **Memory:** 2GB or 4GB RAM (variant-dependent)
 * **Graphics:** GPU with OpenGL ES 2.0 support
 * **Display:** 30 degree diagonal FoV, full-color waveguide display on the right eye
 * **Primary Input:** Eye control sensors

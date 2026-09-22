@@ -10,7 +10,7 @@
   "deployment": {
     "DEPLOY_ENDPOINT_URL": "https://api.s.raven.computer/developer/deploy/app/",
     "ACCEPTING_DEPLOYMENTS": true,
-    "PYTHON_VERSION_ON_RAVEN_DEVICE": "3.12.12"
+    "PYTHON_VERSION_ON_RAVEN_DEVICE": "3.14"
   },
   "peripherals": {
     "DEFAULT_CAMERA_INDEX": 0,
