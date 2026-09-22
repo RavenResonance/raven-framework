@@ -38,7 +38,8 @@ log = get_logger("PlatformLib")
 # Daemon socket path  (must match ravend/protocol.py)
 # ---------------------------------------------------------------------------
 
-_SOCKET_DIR = load_config().get("ipc", {}).get("RAVEND_SOCKET_DIR", "/run/ravend")
+_config = load_config()
+_SOCKET_DIR = _config["ipc"]["RAVEND_SOCKET_DIR"]
 _PLATFORM_SOCKET = f"{_SOCKET_DIR}/platform.sock"
 
 _CONNECT_TIMEOUT_S = 3.0

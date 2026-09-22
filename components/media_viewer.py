@@ -105,32 +105,21 @@ class MediaViewer(QWidget):
     corners, auto-scaling, and playback controls.
 
     Video prefers hardware decode on a real device: `v4l2h264dec` (VPU) ->
-    `imxg2dvideotransform` (G2D color-space convert) via GStreamer, the same
-    chain raven-canopy's Perch YouTube player uses (see
-    raven/apps/perch/gst_youtube_player.py). imxg2dvideotransform is
-    required because v4l2h264dec's output is DMABuf-backed, which plain
-    `videoconvert` cannot negotiate -- see that file's docstring for the
-    full story. `parsebin` (not a container-specific demuxer) is used so
-    any container GStreamer can identify (mp4/mov/mkv/avi/...) works
-    generically; only the H.264 elementary stream inside is linked to the
-    hardware decoder (this SoC's VPU decode path is H.264/H.265/VP8/VP9 in
-    hardware, but only H.264 is wired up here).
+    `imxg2dvideotransform` (G2D color-space convert) via GStreamer.
+    `parsebin` (not a container-specific demuxer) is used so any container
+    GStreamer can identify (mp4/mov/mkv/avi/...) works generically; only
+    the H.264 elementary stream inside is linked to the hardware decoder
+    (this SoC's VPU decode path is H.264/H.265/VP8/VP9 in hardware, but
+    only H.264 is wired up here).
 
-    Everything else falls back to software decode (`cv2.VideoCapture`,
-    forced onto the FFMPEG backend -- see `_load_video_opencv_fallback`),
-    so anything that could play before this hardware path existed still
-    plays: the simulator (v4l2h264dec/imxg2dvideotransform are i.MX-specific
-    and don't exist on a dev laptop), a device image missing those plugins,
-    a non-H.264 codec, or a runtime GStreamer pipeline error. Benchmarking
-    (prototyping/software-experiments/media-decode-bench, later moved to
-    projects/raven-canopy/tools/cpu-tests/) found the hardware path far
-    faster and far cheaper on CPU at every frequency versus always using
-    the software path -- and separately found bare `cv2.VideoCapture(path)`
-    (no explicit backend) prone to hanging indefinitely inside a live
-    Qt/Wayland app, since it can pick GStreamer as its own backend and
-    deadlock initializing a second GStreamer main loop from inside Qt's --
-    confirmed reproducible, root-caused, fixed here by forcing
-    `cv2.CAP_FFMPEG` explicitly wherever the software path is used.
+    Everything else falls back to software decode (`cv2.VideoCapture`
+    forced onto `cv2.CAP_FFMPEG` -- see `_load_video_opencv_fallback`).
+    This covers non-hardware-decode cases (the simulator, a non-H.264
+    codec, a runtime GStreamer pipeline error) as well as a real bug:
+    bare `cv2.VideoCapture(path)` (no explicit backend) can pick
+    GStreamer as its own backend and deadlock initializing a second
+    GStreamer main loop from inside a live Qt app -- avoided by forcing
+    `cv2.CAP_FFMPEG` explicitly.
 
     Args:
         media_path (Optional[str]): Path to the media file to load. Defaults to None.
@@ -429,9 +418,8 @@ class MediaViewer(QWidget):
         or the software OpenCV fallback in the simulator -- `v4l2h264dec`
         and `imxg2dvideotransform` are i.MX-specific and don't exist on a
         developer's Mac/Windows/Linux laptop. Also falls back on-device if
-        hardware element creation fails for any reason (e.g. an older image
-        missing the gstreamer-imx recipe -- see raven-os's
-        `[RV-1683] feat: add gstreamer-imx G2D hardware-decode-convert recipe`).
+        hardware element creation fails for any reason (e.g. an older
+        device image missing the required hardware-decode plugins).
         """
         if is_raven_device():
             self._load_video_gstreamer(path)
@@ -475,7 +463,9 @@ class MediaViewer(QWidget):
         appsink = Gst.ElementFactory.make("appsink", "appsink")
 
         if not all([pipeline, src, parse, dec, g2d, capsfilter, appsink]):
-            log.error("Failed to create one or more GStreamer elements for hardware video decode")
+            log.error(
+                "Failed to create one or more GStreamer elements for hardware video decode"
+            )
             self.is_video = False
             return
 
@@ -557,7 +547,9 @@ class MediaViewer(QWidget):
         try:
             qimg = QImage(data, width, height, 4 * width, QImage.Format.Format_RGB32)
             pixmap = self._scaled_pixmap(
-                QPixmap.fromImage(qimg), self.media_widget.width(), self.media_widget.height()
+                QPixmap.fromImage(qimg),
+                self.media_widget.width(),
+                self.media_widget.height(),
             )
             self.media_widget.setPixmap(pixmap)
             if self._show_fps_report:
@@ -569,7 +561,7 @@ class MediaViewer(QWidget):
         """Polls the pipeline's bus for EOS/ERROR on a QTimer instead of a
         GLib main loop watch (Qt's event loop doesn't drive GLib's default
         main context, so add_signal_watch() callbacks would otherwise never
-        fire -- same pattern as gst_youtube_player.py's `_poll_bus`)."""
+        fire)."""
         if not self._gst_pipeline:
             return
         Gst = self._gst_module
@@ -587,7 +579,9 @@ class MediaViewer(QWidget):
                 return
             elif message.type == Gst.MessageType.EOS:
                 if self.loop_video:
-                    self._gst_pipeline.seek_simple(Gst.Format.TIME, Gst.SeekFlags.FLUSH, 0)
+                    self._gst_pipeline.seek_simple(
+                        Gst.Format.TIME, Gst.SeekFlags.FLUSH, 0
+                    )
                 else:
                     self.cleanup_video_resources()
                     return
@@ -621,15 +615,10 @@ class MediaViewer(QWidget):
         or a real device image that's somehow missing those plugins.
 
         Forces the FFMPEG backend explicitly (`cv2.CAP_FFMPEG`) rather than
-        letting `cv2.VideoCapture(path)` auto-pick: on the on-device OpenCV
-        build (which has both FFMPEG and GStreamer support compiled in),
-        auto-pick chose GStreamer, which deadlocked initializing its own
-        main loop/context from inside this already-running Qt+Wayland
-        event loop -- confirmed reproducible, root-caused during the
-        hardware-decode benchmark that motivated this whole change (see
-        class docstring). Forcing FFMPEG avoided it entirely. Applying the
-        same fix here defensively, since any OpenCV build with multiple
-        backends compiled in could hit the same class of bug.
+        letting `cv2.VideoCapture(path)` auto-pick: on an OpenCV build with
+        both FFMPEG and GStreamer support compiled in, auto-pick can choose
+        GStreamer and deadlock initializing its own main loop/context from
+        inside an already-running Qt event loop. Forcing FFMPEG avoids it.
         """
         import cv2
         import numpy as np
@@ -1159,7 +1148,9 @@ class MediaViewer(QWidget):
         try:
             if self.is_video and self._gst_pipeline is not None:
                 self._gst_pipeline.set_state(self._gst_module.State.PLAYING)
-            elif self.is_video and self.cap and self.timer and not self.timer.isActive():
+            elif (
+                self.is_video and self.cap and self.timer and not self.timer.isActive()
+            ):
                 self.timer.start()
             elif self.movie:
                 self.movie.setPaused(False)
