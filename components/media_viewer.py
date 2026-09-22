@@ -104,22 +104,11 @@ class MediaViewer(QWidget):
     A QWidget subclass that displays images, GIFs, or video with rounded
     corners, auto-scaling, and playback controls.
 
-    Video prefers hardware decode on a real device: `v4l2h264dec` (VPU) ->
-    `imxg2dvideotransform` (G2D color-space convert) via GStreamer.
-    `parsebin` (not a container-specific demuxer) is used so any container
-    GStreamer can identify (mp4/mov/mkv/avi/...) works generically; only
-    the H.264 elementary stream inside is linked to the hardware decoder
-    (this SoC's VPU decode path is H.264/H.265/VP8/VP9 in hardware, but
-    only H.264 is wired up here).
-
-    Everything else falls back to software decode (`cv2.VideoCapture`
-    forced onto `cv2.CAP_FFMPEG` -- see `_load_video_opencv_fallback`).
-    This covers non-hardware-decode cases (the simulator, a non-H.264
-    codec, a runtime GStreamer pipeline error) as well as a real bug:
-    bare `cv2.VideoCapture(path)` (no explicit backend) can pick
-    GStreamer as its own backend and deadlock initializing a second
-    GStreamer main loop from inside a live Qt app -- avoided by forcing
-    `cv2.CAP_FFMPEG` explicitly.
+    Video prefers hardware-accelerated decode on a real device via
+    GStreamer (H.264 only), falling back to software decode
+    (`cv2.VideoCapture` forced onto `cv2.CAP_FFMPEG` -- see
+    `_load_video_opencv_fallback`) for the simulator, an unsupported
+    codec, or a runtime decode failure.
 
     Args:
         media_path (Optional[str]): Path to the media file to load. Defaults to None.
@@ -415,30 +404,25 @@ class MediaViewer(QWidget):
     def _load_video(self, path: str) -> None:
         """
         Dispatches to hardware-decoded GStreamer playback on a real device,
-        or the software OpenCV fallback in the simulator -- `v4l2h264dec`
-        and `imxg2dvideotransform` are i.MX-specific and don't exist on a
-        developer's Mac/Windows/Linux laptop. Also falls back on-device if
-        hardware element creation fails for any reason (e.g. an older
-        device image missing the required hardware-decode plugins).
+        or the software OpenCV fallback in the simulator or if hardware
+        element creation fails for any reason.
         """
         if is_raven_device():
             self._load_video_gstreamer(path)
             if self._gst_pipeline is not None:
                 return
             log.warning(
-                "Hardware video decode unavailable on this device image "
-                "(v4l2h264dec/imxg2dvideotransform missing) -- falling back to software decode."
+                "Hardware video decode unavailable on this device -- "
+                "falling back to software decode."
             )
         self._load_video_opencv_fallback(path)
 
     def _load_video_gstreamer(self, path: str) -> None:
         """
         Load and start playing video via hardware decode: filesrc -> parsebin
-        (generic demux+parse, any container) -> v4l2h264dec (VPU) ->
-        imxg2dvideotransform (G2D convert to system-memory BGRx, required --
-        see class docstring) -> appsink. Frames arrive via `_on_gst_new_sample`
-        on the GStreamer streaming thread and are handed to Qt via the
-        `_gst_frame_ready` signal.
+        (generic demux+parse, any container) -> hardware decoder -> colorspace
+        convert -> appsink. Frames arrive via `_on_gst_new_sample` on the
+        GStreamer streaming thread and are handed to Qt via `_gst_frame_ready`.
         """
         try:
             import gi
@@ -487,17 +471,14 @@ class MediaViewer(QWidget):
         def on_pad_added(_element, pad) -> None:
             """parsebin exposes pads dynamically per elementary stream found
             in the container -- link only the H.264 video pad to the
-            hardware decoder chain; ignore audio (this class has never
-            played it). A non-H.264 video codec falls back to software
-            decode instead of silently playing nothing -- anything the old
-            cv2-only path could play should still play."""
+            hardware decoder chain; ignore audio. A non-H.264 video codec
+            falls back to software decode instead of playing nothing."""
             caps = pad.get_current_caps() or pad.query_caps(None)
             structure = caps.get_structure(0) if caps and caps.get_size() > 0 else None
             name = structure.get_name() if structure else ""
             if name.startswith("video/") and name != "video/x-h264":
                 log.warning(
-                    f"Video stream is {name!r}, not H.264 -- this SoC's hardware "
-                    "decode path is only wired up for H.264 in MediaViewer; "
+                    f"Video stream is {name!r}, not H.264 -- "
                     "falling back to software decode."
                 )
                 self._gst_fallback_needed.emit(path)
@@ -587,13 +568,10 @@ class MediaViewer(QWidget):
                     return
 
     def _fallback_to_opencv(self, path: str) -> None:
-        """Tears down a hardware pipeline that can't actually play this file
-        (wrong codec, or a runtime pipeline error) and retries via software
-        decode, so anything the old cv2-only path could play still plays.
-        Guarded against firing twice for the same pipeline (a codec-mismatch
-        pad and a later bus error could in principle both fire) by checking
-        ``_gst_pipeline`` is still set -- this method is the only place that
-        clears it outside of normal cleanup."""
+        """Tears down a hardware pipeline that can't play this file (wrong
+        codec, or a runtime error) and retries via software decode. Guarded
+        against firing twice for the same pipeline by checking
+        ``_gst_pipeline`` is still set."""
         if self._gst_pipeline is None:
             return
         log.info(f"Falling back to software video decode for: {path}")
@@ -609,16 +587,13 @@ class MediaViewer(QWidget):
 
     def _load_video_opencv_fallback(self, path: str) -> None:
         """
-        Software-decode fallback for contexts with no hardware VPU: the
-        simulator (any developer laptop -- Mac/Windows/Linux -- has neither
-        `v4l2h264dec` nor `imxg2dvideotransform`, which are i.MX-specific),
-        or a real device image that's somehow missing those plugins.
+        Software-decode fallback: the simulator, or a device without
+        hardware-decode support available.
 
         Forces the FFMPEG backend explicitly (`cv2.CAP_FFMPEG`) rather than
-        letting `cv2.VideoCapture(path)` auto-pick: on an OpenCV build with
-        both FFMPEG and GStreamer support compiled in, auto-pick can choose
-        GStreamer and deadlock initializing its own main loop/context from
-        inside an already-running Qt event loop. Forcing FFMPEG avoids it.
+        letting `cv2.VideoCapture(path)` auto-pick, which can select
+        GStreamer and deadlock initializing its own main loop from inside
+        an already-running Qt event loop.
         """
         import cv2
         import numpy as np
