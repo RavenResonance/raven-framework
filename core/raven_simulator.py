@@ -19,7 +19,19 @@ from typing import List, Optional
 
 import numpy as np
 import shiboken6
-from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import (
+    QEasingCurve,
+    QEvent,
+    QObject,
+    QPoint,
+    QPointF,
+    QPropertyAnimation,
+    QRect,
+    Qt,
+    QThread,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import (
     QColor,
     QEnterEvent,
@@ -28,6 +40,7 @@ from PySide6.QtGui import (
     QMouseEvent,
     QPainter,
     QPixmap,
+    QRegion,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -38,21 +51,37 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QProgressDialog,
     QPushButton,
+    QSlider,
     QVBoxLayout,
     QWidget,
 )
 
 from ..helpers.animation_utils import fade_in, fade_out
 from ..helpers.logger import get_logger
-from ..helpers.utils import qpixmap_to_rgb_bytes
 from ..helpers.utils_light import load_config, set_custom_circle_cursor
-from .waveguide_halo import apply_waveguide_halo
 from .simulator_background import (
+    DEFAULT_BACKGROUND_PRESET,
     SimulatorBackgroundPreset,
     SimulatorBackgroundWidget,
     _BackgroundUploadWorker,
     _list_uploaded_backgrounds,
+    _resize_cover,
+    default_background_size,
+    media_size,
 )
+from .simulator_recorder import (
+    SimulatorRecordWorker,
+    clear_stale_recordings,
+    discard_recording,
+    last_recordings_dir,
+    last_screenshots_dir,
+    save_recording,
+    save_screenshot,
+    screenshot_filename,
+    temp_recording_path,
+)
+from .waveguide_halo import DOWNSCALE as HALO_DOWNSCALE
+from .waveguide_halo import apply_waveguide_halo
 
 log = get_logger("RunApp")
 _config = load_config()
@@ -67,14 +96,27 @@ DISPLAY_RESOLUTION = tuple(_config["resolution"]["DISPLAY_RESOLUTION"])
 DEFAULT_OVERLAY_BRIGHTNESS = _config["simulator"]["DEFAULT_OVERLAY_BRIGHTNESS"]
 APP_WINDOW_RESOLUTION = (DISPLAY_RESOLUTION[0], DISPLAY_RESOLUTION[1])
 CLIENT_DEVICE_ADDITIONAL_WINDOW_HEIGHT = 60
+WINDOW_TITLE_BAR_ALLOWANCE = 32
+STAGE_BACKDROP_RGB = (30, 30, 30)
+STAGE_BACKDROP_COLOR = "#{:02X}{:02X}{:02X}".format(*STAGE_BACKDROP_RGB)
+RECORD_BUTTON_IDLE_TEXT = "● Record"
+TINT_SLIDER_PANEL_WIDTH = 170
+TINT_SLIDER_ANIM_MS = 250
+BAR_REFLECTION_BLUR_SIGMA = 16
+BAR_REFLECTION_DIM = 0.6
+QWIDGETSIZE_MAX = 16777215  # Qt max
+SIMULATOR_CV_THREADS = 1  # less CPU on macOS
 RAW_MODE_TOOLTIP_TEXT = _config["simulator"]["RAW_MODE_TOOLTIP_TEXT"]
 PRINT_SIMULATOR_PERFORMANCE = _config["simulator"]["PRINT_SIMULATOR_PERFORMANCE"]
 SIMULATOR_CALIBRATION_FILENAME = _config["simulator"]["SIMULATOR_CALIBRATION_FILENAME"]
 FIXED_BACKGROUND_TINT_FACTOR = _config["simulator"]["FIXED_BACKGROUND_TINT_FACTOR"]
+TINT_DEFAULT_STRENGTH = round((1.0 - FIXED_BACKGROUND_TINT_FACTOR) * 100)
 UI_SHRINK_WIDTH = _config["simulator"]["UI_SHRINK_WIDTH"]
 UI_SHRINK_HEIGHT = _config["simulator"]["UI_SHRINK_HEIGHT"]
 UI_SHRINK_OFFSET_X = _config["simulator"]["UI_SHRINK_OFFSET_X"]
 UI_SHRINK_OFFSET_Y = _config["simulator"]["UI_SHRINK_OFFSET_Y"]
+UI_RIGHT_MARGIN = DISPLAY_RESOLUTION[0] - UI_SHRINK_OFFSET_X - UI_SHRINK_WIDTH
+UI_CENTER_ANCHOR_MIN_WIDTH = 2 * (UI_SHRINK_WIDTH + UI_RIGHT_MARGIN)
 CONSIDER_POINT_SPREAD = _config["simulator"]["CONSIDER_POINT_SPREAD"]
 CONSIDER_WAVEGUIDE_HALO = _config["simulator"]["CONSIDER_WAVEGUIDE_HALO"]
 HALO_RADIUS = _config["simulator"]["HALO_RADIUS"]
@@ -83,9 +125,8 @@ HALO_STRENGTH = _config["simulator"]["HALO_STRENGTH"]
 
 DEFAULT_SIMULATOR_BACKGROUND_RGB = (40, 40, 40)
 BACKLIGHT_COLOR_RGB = (7, 7, 15)
-_BACKLIGHT_COLOR_BGR = BACKLIGHT_COLOR_RGB[::-1]
 _BACKLIGHT_LAYER_BGR = np.full(
-    (UI_SHRINK_HEIGHT, UI_SHRINK_WIDTH, 3), _BACKLIGHT_COLOR_BGR, dtype=np.uint8
+    (UI_SHRINK_HEIGHT, UI_SHRINK_WIDTH, 3), BACKLIGHT_COLOR_RGB[::-1], dtype=np.uint8
 )
 
 _cal_path = Path(__file__).resolve().parent / SIMULATOR_CALIBRATION_FILENAME
@@ -177,6 +218,18 @@ _LUT_D_3D = _build_lut_d_3d()
 _LUT_D_3D_LINEAR = _build_lut_d_3d_linear()
 _LUT_OUT_3D = _build_lut_out_3d()
 _LUT_TINT = _build_lut_tint(FIXED_BACKGROUND_TINT_FACTOR)
+_LUT_BG_PASSTHROUGH = _LUT_OUT_3D[_LUT_SRGB_TO_LIN_BYTE, 0, 0]
+
+
+def _blend_pad() -> int:
+    """HUD light spread."""
+    pad = POINT_SPREAD_KERNEL.shape[0] // 2 if CONSIDER_POINT_SPREAD else 0
+    if CONSIDER_WAVEGUIDE_HALO and HALO_STRENGTH != 0.0:
+        pad += 4 * HALO_RADIUS + 2 * HALO_DOWNSCALE
+    return -(-pad // HALO_DOWNSCALE) * HALO_DOWNSCALE
+
+
+_BLEND_PAD = _blend_pad()
 
 
 def blend_frame(bg_bgr, snapshot_bgr):
@@ -271,8 +324,14 @@ def blend_frame(bg_bgr, snapshot_bgr):
     # -------------------------------------------------------------------------
     import cv2
 
+    return _blend_background(bg_bgr, *_hud_stage(snapshot_bgr))
+
+
+def _hud_stage(snapshot_bgr):
+    """HUD half of blend_frame."""
+    import cv2
+
     # Step 1
-    bi = cv2.LUT(bg_bgr, _LUT_SRGB_TO_LIN_BYTE)
     si = cv2.LUT(snapshot_bgr, _LUT_SRGB_TO_LIN_BYTE)
 
     # Step 2
@@ -287,31 +346,84 @@ def blend_frame(bg_bgr, snapshot_bgr):
         use_linear_demand = True
 
     # Step 3
-    if use_linear_demand:
-        d = _LUT_D_3D_LINEAR[si[:, :, 0], si[:, :, 1], si[:, :, 2]]
-    else:
-        d = _LUT_D_3D[
-            snapshot_bgr[:, :, 0],
-            snapshot_bgr[:, :, 1],
-            snapshot_bgr[:, :, 2],
-        ]
+    d = _take_3d(
+        _LUT_D_3D_LINEAR if use_linear_demand else _LUT_D_3D,
+        si if use_linear_demand else snapshot_bgr,
+    )
 
-    # Step 4
-    blended = np.empty_like(bg_bgr)
-    for i in range(3):
-        blended[:, :, i] = _LUT_OUT_3D[bi[:, :, i], si[:, :, i], d]
-    return blended
+    return si, d
+
+
+def _blend_background(bg_bgr, si, d):
+    """Background half of blend_frame."""
+    import cv2
+
+    bi = cv2.LUT(bg_bgr, _LUT_SRGB_TO_LIN_BYTE)
+    return _take_3d(_LUT_OUT_3D, bi, si, d[:, :, None])
+
+
+def _take_3d(lut, a, b=None, c=None):
+    """Fast 3D LUT lookup."""
+    if b is None:
+        a, b, c = a[:, :, 0], a[:, :, 1], a[:, :, 2]
+    index = a.astype(np.uint32) << 16
+    index |= b.astype(np.uint32) << 8
+    index |= c
+    return np.take(lut.reshape(-1), index, mode="clip")
+
+
+def compose_frame(bg_bgr, ui_bgr, ui_x: int, ui_y: int, hud_cache=None):
+    """Blend HUD onto background."""
+    import cv2
+
+    canvas_h, canvas_w = bg_bgr.shape[:2]
+    ui_h, ui_w = ui_bgr.shape[:2]
+    if USE_SIMPLE_ADDITIVE_BLEND:
+        out = bg_bgr.copy()
+        pad = 0
+    else:
+        out = cv2.LUT(bg_bgr, _LUT_BG_PASSTHROUGH)
+        pad = _BLEND_PAD
+
+    x0, y0 = max(0, ui_x - pad), max(0, ui_y - pad)
+    x1, y1 = min(canvas_w, ui_x + ui_w + pad), min(canvas_h, ui_y + ui_h + pad)
+    if x1 <= x0 or y1 <= y0:
+        return out
+
+    key = (x0 - ui_x, y0 - ui_y, x1 - x0, y1 - y0)
+    cached = hud_cache.get(key) if hud_cache is not None else None
+    if cached is None:
+        hud = np.zeros((y1 - y0, x1 - x0, 3), dtype=np.uint8)
+        ux0, uy0 = max(ui_x, x0), max(ui_y, y0)
+        ux1, uy1 = min(ui_x + ui_w, x1), min(ui_y + ui_h, y1)
+        if ux1 > ux0 and uy1 > uy0:
+            hud[uy0 - y0 : uy1 - y0, ux0 - x0 : ux1 - x0] = ui_bgr[
+                uy0 - ui_y : uy1 - ui_y, ux0 - ui_x : ux1 - ui_x
+            ]
+        cached = hud if USE_SIMPLE_ADDITIVE_BLEND else _hud_stage(hud)
+        if hud_cache is not None:
+            hud_cache[key] = cached
+
+    bg_window = bg_bgr[y0:y1, x0:x1]
+    if USE_SIMPLE_ADDITIVE_BLEND:
+        out[y0:y1, x0:x1] = cv2.add(bg_window, cached)
+    else:
+        out[y0:y1, x0:x1] = _blend_background(bg_window, *cached)
+    return out
 
 
 class SimulatorBlendWorker(QObject):
-    """Runs in a QThread; blends app RGBA grab with background via ``blend_frame``."""
+    """Runs in a QThread; blends the app's BGR render with the background via ``compose_frame``."""
 
-    result_ready = Signal(object, int, int, int)  # (rgb_bytes, width, height, sequence)
+    result_ready = Signal(object, int, int, int, object)
 
     def __init__(self, blend_queue: queue.Queue, get_bg_fn) -> None:
         super().__init__()
         self._queue = blend_queue
         self._get_bg = get_bg_fn
+        self._last_ui_key = None
+        self._ui_bgr = None
+        self._hud_cache: dict = {}
 
     def process_loop(self) -> None:
         import cv2
@@ -325,86 +437,158 @@ class SimulatorBlendWorker(QObject):
             if item is None:
                 break
             try:
-                app_bytes, w, h, seq, brightness = item
-                snapshot_rgb = np.frombuffer(app_bytes, dtype=np.uint8).reshape(
-                    (h, w, 3)
-                )
-                bg_rgb = self._get_bg()
-                if bg_rgb is None:
+                (
+                    app_bytes,
+                    w,
+                    h,
+                    seq,
+                    brightness,
+                    canvas_w,
+                    canvas_h,
+                    ui_x,
+                    ui_y,
+                ) = item
+                bg_bgr = self._get_bg()
+                if bg_bgr is None:
                     log.warning(
                         "SimulatorBlendWorker: No background passed to blend worker, using default background"
                     )
-                    bg_rgb = np.full(
-                        (h, w, 3), DEFAULT_SIMULATOR_BACKGROUND_RGB, dtype=np.uint8
+                    bg_bgr = np.full(
+                        (canvas_h, canvas_w, 3),
+                        DEFAULT_SIMULATOR_BACKGROUND_RGB[::-1],
+                        dtype=np.uint8,
                     )
+                elif bg_bgr.shape[:2] != (canvas_h, canvas_w):
+                    bg_bgr = _resize_cover(bg_bgr, canvas_w, canvas_h)
                 if ENABLE_TINT:
-                    bg_bgr = _LUT_TINT[bg_rgb[..., ::-1]]
-                else:
-                    bg_bgr = cv2.cvtColor(bg_rgb, cv2.COLOR_RGB2BGR)
-                snapshot_bgr = cv2.cvtColor(snapshot_rgb, cv2.COLOR_RGB2BGR)
-                if snapshot_bgr.shape[:2] != bg_bgr.shape[:2]:
-                    snapshot_bgr = cv2.resize(
-                        snapshot_bgr,
-                        (bg_bgr.shape[1], bg_bgr.shape[0]),
-                        interpolation=cv2.INTER_LINEAR,
-                    )
-                if brightness != 1.0:
-                    snapshot_bgr = cv2.convertScaleAbs(
-                        snapshot_bgr, alpha=brightness, beta=0
-                    )
-                if ENABLE_UI_SHRINK:
-                    snapshot_bgr = _shrink_and_letterbox(
-                        snapshot_bgr,
-                        UI_SHRINK_WIDTH,
-                        UI_SHRINK_HEIGHT,
-                        UI_SHRINK_OFFSET_X,
-                        UI_SHRINK_OFFSET_Y,
-                    )
-                    if ENABLE_SIMULATE_BACKLIGHT:
-                        _apply_backlight_in_place(
-                            snapshot_bgr,
-                            UI_SHRINK_OFFSET_X,
-                            UI_SHRINK_OFFSET_Y,
-                            UI_SHRINK_WIDTH,
-                            UI_SHRINK_HEIGHT,
-                        )
-                if USE_SIMPLE_ADDITIVE_BLEND:
-                    blended = cv2.add(bg_bgr, snapshot_bgr)
-                else:
-                    blended = blend_frame(bg_bgr, snapshot_bgr)
-                blended_rgb = np.ascontiguousarray(
-                    cv2.cvtColor(blended, cv2.COLOR_BGR2RGB)
+                    bg_bgr = cv2.LUT(bg_bgr, _LUT_TINT)
+                ui_bgr = self._prepared_ui(app_bytes, w, h, brightness)
+                blended = np.ascontiguousarray(
+                    compose_frame(bg_bgr, ui_bgr, ui_x, ui_y, self._hud_cache)
                 )
-                out_h, out_w = blended_rgb.shape[:2]
-                self.result_ready.emit(blended_rgb.tobytes(), out_w, out_h, seq)
+                out_h, out_w = blended.shape[:2]
+                bar = _bar_reflection(blended, CLIENT_DEVICE_ADDITIONAL_WINDOW_HEIGHT)
+                frame_bgra = cv2.cvtColor(blended, cv2.COLOR_BGR2BGRA)
+                self.result_ready.emit(
+                    frame_bgra.tobytes(), out_w, out_h, seq, bar.tobytes()
+                )
             except Exception as e:
                 log.debug(f"SimulatorBlendWorker: {e}")
 
+    def _prepared_ui(self, app_bytes: bytes, w: int, h: int, brightness: float):
+        """Shrunk, backlit HUD."""
+        import cv2
 
-def _shrink_and_letterbox(
-    frame, shrink_w: int, shrink_h: int, offset_x: int, offset_y: int
-):
-    """Downscale frame to (shrink_w, shrink_h) and place it at (offset_x, offset_y) on a black canvas."""
+        key = (w, h, brightness)
+        if self._ui_bgr is not None and self._last_ui_key == (key, app_bytes):
+            return self._ui_bgr
+        ui = np.frombuffer(app_bytes, dtype=np.uint8).reshape((h, w, 4))
+        if brightness != 1.0:
+            ui = cv2.convertScaleAbs(ui, alpha=brightness, beta=0)
+        if ENABLE_UI_SHRINK:
+            ui = cv2.resize(
+                ui, (UI_SHRINK_WIDTH, UI_SHRINK_HEIGHT), interpolation=cv2.INTER_AREA
+            )
+        ui_bgr = cv2.cvtColor(ui, cv2.COLOR_BGRA2BGR)
+        if ENABLE_UI_SHRINK and ENABLE_SIMULATE_BACKLIGHT:
+            _apply_backlight_in_place(ui_bgr)
+        self._last_ui_key = (key, app_bytes)
+        self._ui_bgr = ui_bgr
+        self._hud_cache = {}
+        return ui_bgr
+
+
+def _apply_backlight_in_place(ui_bgr) -> None:
     import cv2
-    import numpy as np
 
-    shrunk = cv2.resize(frame, (shrink_w, shrink_h), interpolation=cv2.INTER_AREA)
-    canvas = np.zeros_like(frame)
-    canvas[offset_y : offset_y + shrink_h, offset_x : offset_x + shrink_w] = shrunk
-    return canvas
-
-
-def _apply_backlight_in_place(
-    frame, offset_x: int, offset_y: int, width: int, height: int
-) -> None:
-    """Lift pure-black pixels within the given rect to _BACKLIGHT_COLOR_BGR, in place."""
-    import cv2
-
-    region = frame[offset_y : offset_y + height, offset_x : offset_x + width]
-    black_mask = cv2.inRange(region, (0, 0, 0), (0, 0, 0))
-    kept = cv2.bitwise_and(region, region, mask=cv2.bitwise_not(black_mask))
+    black_mask = cv2.inRange(ui_bgr, (0, 0, 0), (0, 0, 0))
+    kept = cv2.bitwise_and(ui_bgr, ui_bgr, mask=cv2.bitwise_not(black_mask))
     lit = cv2.bitwise_and(_BACKLIGHT_LAYER_BGR, _BACKLIGHT_LAYER_BGR, mask=black_mask)
-    region[:] = cv2.bitwise_or(kept, lit)
+    ui_bgr[:] = cv2.bitwise_or(kept, lit)
+
+
+def _bar_reflection(frame, bar_h: int):
+    import cv2
+
+    strip = cv2.flip(frame[-bar_h:], 0)
+    h, w = strip.shape[:2]
+    small = cv2.resize(
+        strip, (max(1, w // 4), max(1, h // 4)), interpolation=cv2.INTER_AREA
+    )
+    sigma = BAR_REFLECTION_BLUR_SIGMA / 4
+    small = cv2.GaussianBlur(small, (0, 0), sigmaX=sigma, sigmaY=sigma)
+    blurred = cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR)
+    return np.ascontiguousarray(
+        cv2.convertScaleAbs(blurred, alpha=BAR_REFLECTION_DIM, beta=0)
+    )
+
+
+class _OpaqueBackdrop(QWidget):
+    """Opaque stage fill."""
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        self._color = QColor(*STAGE_BACKDROP_RGB)
+
+    def paintEvent(self, event) -> None:
+        QPainter(self).fillRect(event.rect(), self._color)
+
+
+class _FrameView(QWidget):
+    """Frame display."""
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self._image: Optional[QImage] = None
+        self._data: Optional[bytes] = None  # keeps buffer alive
+
+    def set_frame(self, data: bytes, w: int, h: int, fmt: QImage.Format) -> None:
+        bytes_per_pixel = 4 if fmt == QImage.Format.Format_RGB32 else 3
+        self._data = data
+        self._image = QImage(data, w, h, w * bytes_per_pixel, fmt)
+        self.update()
+
+    def current_image(self) -> Optional[QImage]:
+        """Deep copy of the frame on screen, or None if nothing is shown yet."""
+        return None if self._image is None else self._image.copy()
+
+    def clear(self) -> None:
+        self._image = None
+        self._data = None
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        if self._image is None:
+            return
+        painter = QPainter(self)
+        scale = self.width() * self.devicePixelRatioF() / max(1, self._image.width())
+        if abs(scale - round(scale)) > 1e-3:
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        painter.drawImage(self.rect(), self._image)
+
+
+class _ReflectionBar(QWidget):
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self._reflection: Optional[QPixmap] = None
+
+    def set_reflection(self, bgr_bytes: bytes, w: int, h: int) -> None:
+        image = QImage(bgr_bytes, w, h, 3 * w, QImage.Format.Format_BGR888)
+        self._reflection = QPixmap.fromImage(image.copy())
+        self.update()
+
+    def clear_reflection(self) -> None:
+        self._reflection = None
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        if self._reflection is None:
+            painter.fillRect(self.rect(), QColor(*STAGE_BACKDROP_RGB))
+        else:
+            painter.drawPixmap(self.rect(), self._reflection)
+        painter.fillRect(0, 0, self.width(), 1, QColor(255, 255, 255, 28))
 
 
 class _TranslucentPopup(QWidget):
@@ -604,25 +788,36 @@ class SimulatorRunApp(QMainWindow):
         super().__init__()
         self.background_widget = None
         try:
-            self.setWindowTitle("Raven App (alpha v0.1)")
+            import cv2
+
+            cv2.setNumThreads(SIMULATOR_CV_THREADS)
+            self.setWindowTitle("Raven App (alpha v1.0.6)")
             total_window_width = APP_WINDOW_RESOLUTION[0]
             total_window_height = (
                 APP_WINDOW_RESOLUTION[1] + CLIENT_DEVICE_ADDITIONAL_WINDOW_HEIGHT
             )
-            self.setFixedSize(int(total_window_width), int(total_window_height))
+            self._min_window_size = (int(total_window_width), int(total_window_height))
+            self.setMinimumSize(*self._min_window_size)
+            framework_dir = os.path.dirname(os.path.dirname(__file__))
+            self._framework_dir = framework_dir
+            self.resize(*self._default_window_size(framework_dir))
             container = QWidget(self)
-            container.setStyleSheet("background-color: #1E1E1E;")
+            container.setObjectName("simulatorContainer")
+            container.setStyleSheet(
+                f"QWidget#simulatorContainer {{ background-color: {STAGE_BACKDROP_COLOR}; }}"
+            )
             layout = QVBoxLayout(container)
             layout.setContentsMargins(0, 0, 0, 0)
             layout.setSpacing(0)
 
             content_w = APP_WINDOW_RESOLUTION[0]
             content_h = APP_WINDOW_RESOLUTION[1]
+            self._device_size = (content_w, content_h)
             content_area = QWidget(container)
-            content_area.setFixedSize(content_w, content_h)
+            content_area.setMinimumSize(content_w, content_h)
             content_area.setAutoFillBackground(False)
+            self._content_area = content_area
 
-            framework_dir = os.path.dirname(os.path.dirname(__file__))
             self.background_widget = SimulatorBackgroundWidget(
                 framework_dir, resolution=(content_w, content_h)
             )
@@ -637,26 +832,19 @@ class SimulatorRunApp(QMainWindow):
             self._app_widget = app_widget
             app_widget.setParent(content_area)
             app_widget.setGeometry(0, 0, content_w, content_h)
-            opacity = QGraphicsOpacityEffect(app_widget)
-            opacity.setOpacity(0.0)
-            app_widget.setGraphicsEffect(opacity)
 
-            self._composite_label = QLabel(content_area)
+            self.background_widget.hide()
+            self.background_widget.display_frames = False
+            self._stage_backdrop = _OpaqueBackdrop(content_area)
+
+            self._composite_label = _FrameView(content_area)
             self._composite_label.setGeometry(0, 0, content_w, content_h)
-            self._composite_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._composite_label.setScaledContents(True)
             self._composite_label.setAttribute(Qt.WA_TransparentForMouseEvents)
-            self._composite_label.raise_()
 
             self._gaze_overlay = _GazeRemapOverlay(app_widget, content_area)
             self._gaze_overlay.setGeometry(0, 0, content_w, content_h)
-            self._gaze_overlay.set_transform(
-                UI_SHRINK_WIDTH / content_w,
-                UI_SHRINK_HEIGHT / content_h,
-                QPoint(UI_SHRINK_OFFSET_X, UI_SHRINK_OFFSET_Y),
-            )
-            self._gaze_overlay.set_active(ENABLE_UI_SHRINK)
-            self._gaze_overlay.raise_()
+            self._gaze_overlay.set_active(True)
+            self._restack_stage()
 
             self._composite_timer = QTimer(self)
             self._composite_timer.timeout.connect(self._update_composite)
@@ -669,7 +857,7 @@ class SimulatorRunApp(QMainWindow):
             self._blend_last_sent = -1
             self._composite_grab_pending = False
             get_bg_fn = lambda: (
-                self.background_widget.get_latest_background()
+                self.background_widget.get_latest_background_bgr()
                 if self.background_widget is not None
                 else None
             )
@@ -694,7 +882,8 @@ class SimulatorRunApp(QMainWindow):
 
             layout.addWidget(content_area, 1)
 
-            button_container = QWidget(container)
+            button_container = _ReflectionBar(container)
+            self._button_bar = button_container
             button_layout = QHBoxLayout(button_container)
             button_layout.setContentsMargins(10, 8, 10, 8)
             button_layout.setSpacing(12)
@@ -710,7 +899,8 @@ class SimulatorRunApp(QMainWindow):
                     padding: 6px 14px;
                 }
                 QPushButton:hover {
-                    background-color: rgba(40, 40, 40, 0.92);
+                    background-color: rgba(255, 255, 255, 0.12);
+                    color: white;
                 }
                 QPushButton::menu-indicator {
                     image: none;
@@ -719,23 +909,23 @@ class SimulatorRunApp(QMainWindow):
             """
             self._mode_buttons_active = """
                 QPushButton {
-                    background-color: rgba(48, 48, 48, 0.94);
+                    background-color: rgba(255, 255, 255, 0.20);
                     color: white;
-                    border: none;
+                    border: 1px solid rgba(255, 255, 255, 0.40);
                     border-radius: 8px;
                     font-size: 13px;
                     font-weight: 700;
                     padding: 6px 14px;
                 }
                 QPushButton:hover {
-                    background-color: rgba(62, 62, 62, 0.94);
+                    background-color: rgba(255, 255, 255, 0.26);
                 }
                 QPushButton::menu-indicator {
                     image: none;
                     width: 0px;
                 }
             """
-            self._active_mode = "night"
+            self._active_mode = DEFAULT_BACKGROUND_PRESET.value
 
             tint_button = QPushButton("Tint", button_container)
             tint_button.setFixedSize(70, 38)
@@ -743,6 +933,7 @@ class SimulatorRunApp(QMainWindow):
             tint_button.clicked.connect(self._on_tint_toggle_clicked)
             self._tint_button = tint_button
             self._tint_button_hidden_for_raw = False
+            self._tint_slider_panel = self._build_tint_slider_panel(button_container)
             self._update_tint_button_style()
 
             background_popup = _TranslucentPopup(
@@ -764,10 +955,48 @@ class SimulatorRunApp(QMainWindow):
             background_button.clicked.connect(self._show_background_popup)
             self._background_button = background_button
 
+            self._record_button_recording = """
+                QPushButton {
+                    background-color: rgba(218, 59, 38, 0.25);
+                    color: white;
+                    border: 1px solid rgba(218, 59, 38, 0.85);
+                    border-radius: 8px;
+                    font-size: 13px;
+                    font-weight: 700;
+                    padding: 6px 14px;
+                }
+                QPushButton:hover {
+                    background-color: rgba(218, 59, 38, 0.31);
+                }
+            """
+            record_button = QPushButton(RECORD_BUTTON_IDLE_TEXT, button_container)
+            record_button.setFixedSize(110, 38)
+            record_button.setStyleSheet(self._mode_buttons_glass)
+            record_button.setToolTip("Record the simulator view to an mp4")
+            record_button.clicked.connect(self._on_record_clicked)
+            self._record_button = record_button
+            self._recorder: Optional[SimulatorRecordWorker] = None
+            self._record_thread: Optional[QThread] = None
+            self._record_started_at = 0.0
+            self._record_clock_timer = QTimer(self)
+            self._record_clock_timer.setInterval(500)
+            self._record_clock_timer.timeout.connect(self._update_record_button_text)
+            clear_stale_recordings()
+
+            capture_button = QPushButton("Capture", button_container)
+            capture_button.setFixedSize(110, 38)
+            capture_button.setStyleSheet(self._mode_buttons_glass)
+            capture_button.setToolTip("Save the current simulator frame as a png")
+            capture_button.clicked.connect(self._on_capture_clicked)
+            self._capture_button = capture_button
+
+            button_layout.addWidget(record_button)
+            button_layout.addWidget(capture_button)
             button_layout.addStretch()
+            button_layout.addWidget(self._tint_slider_panel)
             button_layout.addWidget(tint_button)
             button_layout.addWidget(background_button)
-            button_container.setFixedHeight(58)
+            button_container.setFixedHeight(CLIENT_DEVICE_ADDITIONAL_WINDOW_HEIGHT)
             layout.addWidget(button_container)
 
             self._update_mode_button_styles()
@@ -776,88 +1005,159 @@ class SimulatorRunApp(QMainWindow):
             set_custom_circle_cursor(self._app_widget)
             set_custom_circle_cursor(self._gaze_overlay)
 
+            content_area.installEventFilter(self)
+            self._layout_stage()
+
             log.info("SimulatorRunApp initialized successfully.")
         except Exception as e:
             log.error(f"Failed to initialize SimulatorRunApp: {e}", exc_info=True)
             raise
 
-    def _app_grab_to_bytes(self, app_pix: QPixmap):
-        if app_pix.isNull():
-            print("[SimulatorRunApp] _app_grab_to_bytes: app_pix.isNull()", flush=True)
-            log.error("_app_grab_to_bytes: app_pix is null", extra={"console": True})
-            return None
-        result = qpixmap_to_rgb_bytes(app_pix)
-        if result is None:
-            img = app_pix.toImage()
-            print(
-                f"[SimulatorRunApp] _app_grab_to_bytes: invalid size w={img.width()} h={img.height()}",
-                flush=True,
+    def _default_window_size(self, framework_dir: str) -> tuple[int, int]:
+        return self._window_size_for_media(default_background_size(framework_dir))
+
+    def _window_size_for_media(
+        self, size: Optional[tuple[int, int]]
+    ) -> tuple[int, int]:
+        min_w, min_h = self._min_window_size
+        if size is None:
+            return min_w, min_h
+        media_w, media_h = size
+        screen = self.screen().availableGeometry()
+        scale = min(
+            1.0,
+            screen.width() / media_w,
+            (
+                screen.height()
+                - CLIENT_DEVICE_ADDITIONAL_WINDOW_HEIGHT
+                - WINDOW_TITLE_BAR_ALLOWANCE
             )
-            log.error(
-                f"_app_grab_to_bytes: invalid size w={img.width()} h={img.height()}",
-                extra={"console": True},
+            / media_h,
+        )
+        return (
+            max(min_w, int(media_w * scale)),
+            max(min_h, int(media_h * scale) + CLIENT_DEVICE_ADDITIONAL_WINDOW_HEIGHT),
+        )
+
+    def _fit_window_to_media(self, size: Optional[tuple[int, int]]) -> None:
+        if size is None or self._recorder is not None:
+            return
+        if self.isMaximized() or self.isFullScreen():
+            return
+        self.resize(*self._window_size_for_media(size))
+        screen = self.screen().availableGeometry()
+        frame = self.frameGeometry()
+        x = min(max(frame.x(), screen.left()), screen.right() - frame.width() + 1)
+        y = min(max(frame.y(), screen.top()), screen.bottom() - frame.height() + 1)
+        if (x, y) != (frame.x(), frame.y()):
+            self.move(max(x, screen.left()), max(y, screen.top()))
+
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:
+        if obj is self._content_area and event.type() == QEvent.Type.Resize:
+            self._layout_stage()
+        return super().eventFilter(obj, event)
+
+    def _restack_stage(self) -> None:
+        """Fix z-order."""
+        self.background_widget.lower()
+        self._app_widget.stackUnder(self._stage_backdrop)
+        self._stage_backdrop.raise_()
+        self._composite_label.raise_()
+        self._gaze_overlay.raise_()
+
+    def _ui_rect(self) -> QRect:
+        """HUD rect on canvas."""
+        area_w = self._content_area.width()
+        area_h = self._content_area.height()
+        device_w, device_h = self._device_size
+        if ENABLE_UI_SHRINK:
+            ui_w, ui_h = UI_SHRINK_WIDTH, UI_SHRINK_HEIGHT
+            right_margin = UI_RIGHT_MARGIN
+            center_anchor_min_width = UI_CENTER_ANCHOR_MIN_WIDTH
+        else:
+            ui_w, ui_h = device_w, device_h
+            right_margin = 0
+            center_anchor_min_width = 2 * device_w
+        if area_w >= center_anchor_min_width:
+            ui_x = area_w // 2
+        else:
+            ui_x = area_w - right_margin - ui_w
+        return QRect(ui_x, (area_h - ui_h) // 2, ui_w, ui_h)
+
+    def _layout_stage(self) -> None:
+        area = self._content_area.rect()
+        device_w, device_h = self._device_size
+        self._stage_backdrop.setGeometry(area)
+        self._gaze_overlay.setGeometry(area)
+        self.background_widget.set_resolution((area.width(), area.height()))
+
+        if getattr(self, "_raw_mode", False):
+            left = (area.width() - device_w) // 2
+            top = (area.height() - device_h) // 2
+            self._composite_label.setGeometry(left, top, device_w, device_h)
+            self._gaze_overlay.set_transform(1.0, 1.0, QPoint(left, top))
+        else:
+            ui = self._ui_rect()
+            self._composite_label.setGeometry(area)
+            self._gaze_overlay.set_transform(
+                ui.width() / device_w, ui.height() / device_h, ui.topLeft()
             )
+
+    def _render_app_bgra(self) -> Optional[tuple[bytes, int, int]]:
+        """App frame, 1x BGRA."""
+        w, h = self._app_widget.width(), self._app_widget.height()
+        if w <= 0 or h <= 0:
             return None
-        return result
+        image = QImage(w, h, QImage.Format.Format_RGB32)
+        image.setDevicePixelRatio(1.0)
+        image.fill(Qt.GlobalColor.black)
+        painter = QPainter(image)
+        try:
+            self._app_widget.render(
+                painter,
+                QPoint(0, 0),
+                QRegion(),
+                QWidget.RenderFlag.DrawWindowBackground
+                | QWidget.RenderFlag.DrawChildren,
+            )
+        finally:
+            painter.end()
+        return bytes(image.constBits()), w, h
 
     def start_hidden(self) -> None:
         """Make the visible surface transparent until revealed (handoff)."""
-        surface = (
-            self._app_widget
-            if getattr(self, "_raw_mode", False)
-            else getattr(self, "_composite_label", None)
-        )
-        if surface is not None:
-            effect = QGraphicsOpacityEffect(surface)
-            effect.setOpacity(0.0)
-            surface.setGraphicsEffect(effect)
+        effect = QGraphicsOpacityEffect(self._composite_label)
+        effect.setOpacity(0.0)
+        self._composite_label.setGraphicsEffect(effect)
 
     def reveal(self, duration_ms: int) -> None:
         """Fade the visible surface in (handoff cross-fade with the launcher)."""
-        if getattr(self, "_raw_mode", False):
-            fade_in(self._app_widget, duration=duration_ms)
-        elif hasattr(self, "_composite_label"):
-            fade_in(self._composite_label, duration=duration_ms)
+        fade_in(self._composite_label, duration=duration_ms)
 
     def conceal(self, duration_ms: int) -> None:
         """Fade the visible surface out (mirror of reveal, for app exit)."""
-        if getattr(self, "_raw_mode", False):
-            fade_out(self._app_widget, duration=duration_ms)
-        elif hasattr(self, "_composite_label"):
-            fade_out(self._composite_label, duration=duration_ms)
+        fade_out(self._composite_label, duration=duration_ms)
 
     def sleep_app_ui(self, duration_ms: int, curve: str) -> None:
-        """Fade the visible simulator UI out (composite label or raw app widget)."""
+        """Fade the visible simulator UI out."""
         self._app_ui_asleep = True
         if getattr(self, "_raw_mode", False):
-            if hasattr(self, "_raw_update_timer"):
-                self._raw_update_timer.stop()
-            fade_out(self._app_widget, duration=duration_ms, curve=curve)
+            self._raw_update_timer.stop()
         else:
-            if hasattr(self, "_composite_timer"):
-                self._composite_timer.stop()
-            self._composite_label.setAttribute(
-                Qt.WidgetAttribute.WA_TransparentForMouseEvents, False
-            )
-            fade_out(self._composite_label, duration=duration_ms, curve=curve)
+            self._composite_timer.stop()
+        fade_out(self._composite_label, duration=duration_ms, curve=curve)
 
     def wake_app_ui(self, duration_ms: int, curve: str) -> None:
         """Fade the visible simulator UI back in."""
         self._app_ui_asleep = False
         interval = int(1000 / OVERLAY_FRAME_RATE) if OVERLAY_FRAME_RATE > 0 else 33
+        fade_in(self._composite_label, duration=duration_ms, curve=curve)
         if getattr(self, "_raw_mode", False):
-            fade_in(self._app_widget, duration=duration_ms, curve=curve)
-            if hasattr(self, "_raw_update_timer"):
-                self._raw_update_timer.start(interval)
-                QTimer.singleShot(0, self._update_raw_composite)
+            self._raw_update_timer.start(interval)
+            QTimer.singleShot(0, self._update_raw_composite)
         else:
-            fade_in(self._composite_label, duration=duration_ms, curve=curve)
-            self._composite_label.setAttribute(
-                Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
-            )
-            if hasattr(self, "_composite_timer"):
-                self._composite_timer.start(interval)
-                QTimer.singleShot(0, self._update_composite)
+            self._composite_timer.start(interval)
+            QTimer.singleShot(0, self._update_composite)
 
     def _update_composite(self) -> None:
         if self.background_widget is None or not hasattr(self, "_composite_label"):
@@ -879,30 +1179,35 @@ class SimulatorRunApp(QMainWindow):
             return
         if getattr(self, "_raw_mode", False):
             return
-        self._app_widget.setGraphicsEffect(None)
-        try:
-            app_pix = self._app_widget.grab()
-        finally:
-            opacity = QGraphicsOpacityEffect(self._app_widget)
-            opacity.setOpacity(0.0)
-            self._app_widget.setGraphicsEffect(opacity)
-        result = self._app_grab_to_bytes(app_pix)
+        result = self._render_app_bgra()
         if result is None:
-            log.debug("_deferred_composite_grab: _app_grab_to_bytes returned None")
             return
         app_bytes, w, h = result
+        ui = self._ui_rect()
         try:
             seq = self._blend_sequence
             self._blend_sequence += 1
             self._last_put_time = time.perf_counter()
             self._blend_queue.put_nowait(
-                (app_bytes, w, h, seq, DEFAULT_OVERLAY_BRIGHTNESS)
+                (
+                    app_bytes,
+                    w,
+                    h,
+                    seq,
+                    DEFAULT_OVERLAY_BRIGHTNESS,
+                    self._content_area.width(),
+                    self._content_area.height(),
+                    ui.x(),
+                    ui.y(),
+                )
             )
             self._blend_last_sent = seq
         except queue.Full:
             pass
 
-    def _on_blend_result(self, rgb_bytes: bytes, w: int, h: int, seq: int) -> None:
+    def _on_blend_result(
+        self, frame_bytes: bytes, w: int, h: int, seq: int, bar_bytes: bytes
+    ) -> None:
         if not hasattr(self, "_composite_label"):
             return
         if seq != getattr(self, "_blend_last_sent", -2):
@@ -915,14 +1220,15 @@ class SimulatorRunApp(QMainWindow):
             total_ms = (time.perf_counter() - self._last_put_time) * 1000
             self._timing_total_ms.append(total_ms)
         try:
-            q_img = QImage(
-                rgb_bytes,
-                w,
-                h,
-                3 * w,
-                QImage.Format.Format_RGB888,
+            self._composite_label.set_frame(
+                frame_bytes, w, h, QImage.Format.Format_RGB32
             )
-            self._composite_label.setPixmap(QPixmap.fromImage(q_img.copy()))
+            if not self._raw_mode:
+                self._button_bar.set_reflection(
+                    bar_bytes, w, CLIENT_DEVICE_ADDITIONAL_WINDOW_HEIGHT
+                )
+            if self._recorder is not None:
+                self._recorder.add_frame(frame_bytes, w, h, w, h, channels=4)
         except Exception as e:
             log.debug(f"Blend result apply: {e}")
 
@@ -947,83 +1253,142 @@ class SimulatorRunApp(QMainWindow):
     def _update_raw_composite(self) -> None:
         if not getattr(self, "_raw_mode", False):
             return
-        self._app_widget.setGraphicsEffect(None)
-        try:
-            app_pix = self._app_widget.grab()
-        finally:
-            opacity = QGraphicsOpacityEffect(self._app_widget)
-            opacity.setOpacity(1.0)
-            self._app_widget.setGraphicsEffect(opacity)
-        if not app_pix.isNull():
-            self._composite_label.setPixmap(app_pix)
+        result = self._render_app_bgra()
+        if result is None:
+            return
+        bgra_bytes, w, h = result
+        self._composite_label.set_frame(bgra_bytes, w, h, QImage.Format.Format_RGB32)
+        if self._recorder is not None:
+            self._recorder.add_frame(bgra_bytes, w, h, *self._device_size, channels=4)
+
+    def _on_record_clicked(self) -> None:
+        if self._recorder is None:
+            self._start_recording()
+        else:
+            self._stop_recording()
+
+    def _start_recording(self) -> None:
+        self.setFixedSize(self.size())
+        width = self._content_area.width() // 2 * 2  # even for H.264
+        height = self._content_area.height() // 2 * 2
+        fps = OVERLAY_FRAME_RATE if OVERLAY_FRAME_RATE > 0 else 20
+        self._recorder = SimulatorRecordWorker(
+            temp_recording_path(), (width, height), fps, STAGE_BACKDROP_RGB
+        )
+        self._record_thread = QThread(self)
+        self._recorder.moveToThread(self._record_thread)
+        self._record_thread.started.connect(self._recorder.run)
+        self._recorder.finished.connect(self._on_recording_finished)
+        self._record_thread.start()
+
+        self._record_started_at = time.perf_counter()
+        self._record_button.setStyleSheet(self._record_button_recording)
+        self._update_record_button_text()
+        self._record_clock_timer.start()
+        log.info(f"Simulator recording started: {self._recorder.path}")
+        QTimer.singleShot(
+            0,
+            self._update_raw_composite if self._raw_mode else self._update_composite,
+        )
+
+    def _stop_recording(self) -> None:
+        if self._recorder is None:
+            return
+        self._record_clock_timer.stop()
+        self._record_button.setEnabled(False)
+        self._record_button.setText("Saving…")
+        self._recorder.stop()
+
+    def _update_record_button_text(self) -> None:
+        elapsed = int(time.perf_counter() - self._record_started_at)
+        self._record_button.setText(f"■ {elapsed // 60}:{elapsed % 60:02d}")
+
+    def _on_recording_finished(self, path: str, success: bool) -> None:
+        self._record_clock_timer.stop()
+        if self._record_thread is not None:
+            self._record_thread.quit()
+            self._record_thread.wait(3000)
+        self._record_thread = None
+        self._recorder = None
+
+        self.setMinimumSize(*self._min_window_size)
+        self.setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX)
+        self._record_button.setEnabled(True)
+        self._record_button.setText(RECORD_BUTTON_IDLE_TEXT)
+        self._record_button.setStyleSheet(self._mode_buttons_glass)
+        if not success:
+            discard_recording(path)
+            log.error("Simulator recording failed", extra={"console": True})
+            return
+
+        dest_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save recording",
+            os.path.join(last_recordings_dir(), os.path.basename(path)),
+            "MP4 video (*.mp4)",
+        )
+        if not dest_path:
+            discard_recording(path)
+            log.info("Simulator recording discarded", extra={"console": True})
+            return
+        if not dest_path.lower().endswith(".mp4"):
+            dest_path += ".mp4"
+        if save_recording(path, dest_path):
+            self._record_button.setToolTip(f"Last recording: {dest_path}")
+            log.info(f"Simulator recording saved: {dest_path}", extra={"console": True})
+        else:
+            log.error(f"Simulator recording left at: {path}", extra={"console": True})
+
+    def _on_capture_clicked(self) -> None:
+        # Grab before the dialog opens so the shot is the frame the user clicked on.
+        image = self._composite_label.current_image()
+        if image is None:
+            log.warning("No simulator frame to capture yet", extra={"console": True})
+            return
+        dest_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save screenshot",
+            os.path.join(last_screenshots_dir(), screenshot_filename()),
+            "PNG image (*.png)",
+        )
+        if not dest_path:
+            return
+        if not dest_path.lower().endswith(".png"):
+            dest_path += ".png"
+        if save_screenshot(image, dest_path):
+            self._capture_button.setToolTip(f"Last screenshot: {dest_path}")
+            log.info(
+                f"Simulator screenshot saved: {dest_path}", extra={"console": True}
+            )
 
     def _set_raw_view(self, raw: bool) -> None:
         if not hasattr(self, "_raw_mode"):
             return
         self._raw_mode = raw
-        content_area = self._app_widget.parent()
+        self._layout_stage()
+        interval = int(1000 / OVERLAY_FRAME_RATE) if OVERLAY_FRAME_RATE > 0 else 33
         if raw:
             self._active_mode = "raw"
             self._update_mode_button_styles()
             self._composite_timer.stop()
-            self._composite_label.setPixmap(QPixmap())
             self._composite_label.clear()
-            self.background_widget.stackUnder(self._app_widget)
-            self._composite_label.stackUnder(self._app_widget)
-            raw_opacity = QGraphicsOpacityEffect(self._app_widget)
-            raw_opacity.setOpacity(1.0)
-            self._app_widget.setGraphicsEffect(raw_opacity)
-            if content_area is not None:
-                content_area.setAutoFillBackground(True)
-                content_area.setStyleSheet("background-color: #282936;")
-            self._app_widget.raise_()
-            self._composite_label.raise_()
-            gaze_overlay = getattr(self, "_gaze_overlay", None)
-            if gaze_overlay is not None:
-                gaze_overlay.set_active(False)
-            self._app_widget.show()
-            interval = int(1000 / OVERLAY_FRAME_RATE) if OVERLAY_FRAME_RATE > 0 else 33
+            self._button_bar.clear_reflection()
             self._raw_update_timer.start(interval)
             QTimer.singleShot(0, self._update_raw_composite)
-            QApplication.processEvents()
         else:
             self._raw_update_timer.stop()
             self._active_mode = (
                 self.background_widget.current_preset.value
                 if self.background_widget is not None
-                else "night"
+                else DEFAULT_BACKGROUND_PRESET.value
             )
             self._update_mode_button_styles()
-            if content_area is not None:
-                content_area.setAutoFillBackground(False)
-                content_area.setStyleSheet("")
-            opacity = QGraphicsOpacityEffect(self._app_widget)
-            opacity.setOpacity(0.0)
-            self._app_widget.setGraphicsEffect(opacity)
-            self.background_widget.show()
-            self._composite_label.show()
-            self._composite_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-            self._composite_label.setPixmap(QPixmap())
-            self.background_widget.stackUnder(self._app_widget)
-            self._app_widget.stackUnder(self._composite_label)
-            self._composite_label.raise_()
-            gaze_overlay = getattr(self, "_gaze_overlay", None)
-            if gaze_overlay is not None:
-                gaze_overlay.set_active(ENABLE_UI_SHRINK)
-                gaze_overlay.raise_()
-            interval = int(1000 / OVERLAY_FRAME_RATE) if OVERLAY_FRAME_RATE > 0 else 33
+            self._composite_label.clear()
             self._composite_timer.start(interval)
             QTimer.singleShot(0, self._update_composite)
-            self._composite_label.update()
-            QApplication.processEvents()
 
     def _update_mode_button_styles(self) -> None:
         is_raw = self._active_mode == "raw"
-        background_button = getattr(self, "_background_button", None)
-        if background_button is not None:
-            background_button.setStyleSheet(
-                self._mode_buttons_glass if is_raw else self._mode_buttons_active
-            )
         self._update_tint_button_style()
         self._update_tint_button_visibility(is_raw)
 
@@ -1051,6 +1416,8 @@ class SimulatorRunApp(QMainWindow):
     def _on_tint_toggle_clicked(self) -> None:
         global ENABLE_TINT
         ENABLE_TINT = not ENABLE_TINT
+        if ENABLE_TINT:
+            self._tint_slider.setValue(TINT_DEFAULT_STRENGTH)
         self._update_tint_button_style()
 
     def _update_tint_button_style(self) -> None:
@@ -1063,6 +1430,81 @@ class SimulatorRunApp(QMainWindow):
             if (ENABLE_TINT and not is_raw)
             else self._mode_buttons_glass
         )
+        self._slide_tint_slider(ENABLE_TINT and not is_raw)
+
+    def _build_tint_slider_panel(self, parent: QWidget) -> QWidget:
+        panel = QWidget(parent)
+        panel.setFixedHeight(38)
+        panel.setMaximumWidth(0)
+        panel_layout = QHBoxLayout(panel)
+        panel_layout.setContentsMargins(0, 0, 0, 0)
+        panel_layout.setSpacing(8)
+
+        slider = QSlider(Qt.Orientation.Horizontal, panel)
+        slider.setMinimumWidth(TINT_SLIDER_PANEL_WIDTH - 36 - 8)
+        slider.setRange(0, 100)
+        slider.setValue(TINT_DEFAULT_STRENGTH)
+        slider.setToolTip("Tint strength: how much the lenses darken the world")
+        slider.setStyleSheet("""
+            QSlider::groove:horizontal {
+                height: 4px;
+                border-radius: 2px;
+                background: rgba(255, 255, 255, 0.15);
+            }
+            QSlider::sub-page:horizontal {
+                border-radius: 2px;
+                background: rgba(255, 255, 255, 0.7);
+            }
+            QSlider::handle:horizontal {
+                width: 14px;
+                height: 14px;
+                margin: -5px 0;
+                border-radius: 7px;
+                background: white;
+            }
+        """)
+        slider.valueChanged.connect(self._on_tint_strength_changed)
+
+        value_label = QLabel(panel)
+        value_label.setFixedWidth(36)
+        value_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        value_label.setStyleSheet(
+            "color: rgba(255, 255, 255, 0.85); font-size: 13px; font-weight: 500;"
+        )
+        self._tint_slider = slider
+        self._tint_value_label = value_label
+        self._on_tint_strength_changed(slider.value())
+
+        panel_layout.addWidget(slider, 1)
+        panel_layout.addWidget(value_label)
+
+        self._tint_slider_anim = QPropertyAnimation(panel, b"maximumWidth", self)
+        self._tint_slider_anim.setDuration(TINT_SLIDER_ANIM_MS)
+        self._tint_slider_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        return panel
+
+    def _slide_tint_slider(self, visible: bool) -> None:
+        panel = getattr(self, "_tint_slider_panel", None)
+        if panel is None:
+            return
+        target = TINT_SLIDER_PANEL_WIDTH if visible else 0
+        anim = self._tint_slider_anim
+        if anim.endValue() == target and (
+            anim.state() == QPropertyAnimation.State.Running
+            or panel.maximumWidth() == target
+        ):
+            return
+        anim.stop()
+        anim.setStartValue(panel.maximumWidth())
+        anim.setEndValue(target)
+        anim.start()
+
+    def _on_tint_strength_changed(self, strength: int) -> None:
+        global _LUT_TINT
+        _LUT_TINT = _build_lut_tint(1.0 - strength / 100.0)
+        self._tint_value_label.setText(f"{strength}%")
 
     def change_background(self, preset: str) -> None:
         popup = getattr(self, "_background_popup", None)
@@ -1074,6 +1516,8 @@ class SimulatorRunApp(QMainWindow):
         self._update_mode_button_styles()
         if self.background_widget is not None:
             self.background_widget.change_background(preset)
+        if preset == SimulatorBackgroundPreset.ROOM.value:
+            self._fit_window_to_media(default_background_size(self._framework_dir))
 
     def _show_background_popup(self) -> None:
         self._rebuild_background_popup()
@@ -1245,15 +1689,17 @@ class SimulatorRunApp(QMainWindow):
             self.background_widget.set_custom_background(path, is_video)
         self._active_mode = mode_id
         self._update_mode_button_styles()
+        self._fit_window_to_media(media_size(path, is_video))
 
     def _on_delete_uploaded_background(self, mode_id: str, path: str) -> None:
         self._background_popup.hide()
         if self._active_mode == mode_id:
             # Switch away first so any open video capture releases the file
             # before we unlink it (required on Windows; harmless elsewhere).
-            self._active_mode = SimulatorBackgroundPreset.NIGHT.value
+            self._active_mode = DEFAULT_BACKGROUND_PRESET.value
             if self.background_widget is not None:
                 self.background_widget.change_background(self._active_mode)
+            self._fit_window_to_media(default_background_size(self._framework_dir))
         try:
             if os.path.exists(path):
                 os.remove(path)
@@ -1277,7 +1723,11 @@ class SimulatorRunApp(QMainWindow):
     def _start_background_upload(self, file_path: str) -> None:
         if self.background_widget is None:
             return
-        resolution = self.background_widget.resolution
+        screen_size = self.screen().availableGeometry().size()
+        resolution = (
+            max(self._device_size[0], screen_size.width()) // 2 * 2,
+            max(self._device_size[1], screen_size.height()) // 2 * 2,
+        )
 
         self._upload_progress = QProgressDialog(
             "Compressing background…", None, 0, 0, self
@@ -1320,6 +1770,7 @@ class SimulatorRunApp(QMainWindow):
             self.background_widget.set_custom_background(dest_path, is_video)
         self._active_mode = f"custom:{version}"
         self._update_mode_button_styles()
+        self._fit_window_to_media(media_size(dest_path, is_video))
 
     def closeEvent(self, event) -> None:
         if hasattr(self, "_composite_timer") and self._composite_timer.isActive():
@@ -1340,4 +1791,16 @@ class SimulatorRunApp(QMainWindow):
         if upload_thread is not None and upload_thread.isRunning():
             upload_thread.quit()
             upload_thread.wait(5000)
+        if self._recorder is not None and self._record_thread is not None:
+            path = self._recorder.path
+            self._recorder.finished.disconnect(self._on_recording_finished)
+            self._recorder.stop()
+            self._record_thread.quit()
+            dest_path = os.path.join(last_recordings_dir(), os.path.basename(path))
+            if not self._record_thread.wait(10000):
+                log.error(f"Simulator recording did not finish: {path}")
+            elif os.path.exists(path) and save_recording(path, dest_path):
+                log.info(
+                    f"Simulator recording saved: {dest_path}", extra={"console": True}
+                )
         super().closeEvent(event)

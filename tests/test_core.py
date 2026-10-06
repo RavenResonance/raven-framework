@@ -117,7 +117,7 @@ def test_core_simulator_symbols_importable() -> None:
         SimulatorRunApp,
     )
 
-    assert SimulatorBackgroundPreset.DAY.value == "day"
+    assert SimulatorBackgroundPreset.ROOM.value == "room"
     assert SimulatorBackgroundWidget.__name__ == "SimulatorBackgroundWidget"
     assert SimulatorRunApp.__name__ == "SimulatorRunApp"
 
