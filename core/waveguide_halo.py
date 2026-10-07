@@ -81,7 +81,8 @@ def apply_waveguide_halo(
         return hud_linear_u8
 
     # Peak-normalise -- see module docstring.
-    out = (
-        hud_linear_u8.astype(np.float32) + layer * (source_peak / layer_peak) * strength
-    )
-    return np.clip(out, 0.0, 255.0).astype(np.uint8)
+    layer *= np.float32(source_peak / layer_peak)
+    layer *= np.float32(strength)
+    cv2.accumulate(hud_linear_u8, layer)
+    np.clip(layer, 0.0, 255.0, out=layer)
+    return layer.astype(np.uint8)

@@ -276,6 +276,14 @@ button = Button(center_text="Click Me", icon_path="assets/icon.png")
 # With action icon
 button = Button(center_text="Click Me", show_action_icon=True, width=400)
 
+# Icon pinned to a fixed left margin, independent of text length
+button = Button(
+    center_text="Play",
+    icon_path="assets/play_icon.png",
+    content_align="left",
+    content_left_margin=20,
+)
+
 # Click handlers
 self.button = Button(center_text="Click Me")
 self.button.on_clicked(self.on_button_click)
@@ -290,7 +298,7 @@ def on_button_click(self, new_text):
     self.button.set_text(new_text)
 ```
 
-**Key params:** `width`, `height`, `background_color` (hex), `text_size`, `text_color` (hex), `font_weight`, `corner_radius`, `outline_width`, `outline_color`, `dwell_time`, `icon_path`, `disabled`
+**Key params:** `width`, `height`, `background_color` (hex), `text_size`, `text_color` (hex), `font_weight`, `corner_radius`, `outline_width`, `outline_color`, `dwell_time`, `icon_path`, `disabled`, `content_align` ('center' or 'left'), `content_left_margin`
 
 **Key methods:** `set_text(new_text: str)`, `on_clicked(callback, *args, **kwargs)`, `set_disabled(disabled: bool)`, `set_enabled(enabled: bool)`, `is_disabled() -> bool`
 

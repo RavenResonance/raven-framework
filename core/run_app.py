@@ -253,7 +253,7 @@ class RunApp(QMainWindow):
         super().__init__()
         self.background_buttons = []
         try:
-            self.setWindowTitle("Raven App (alpha v0.1)")
+            self.setWindowTitle("Raven App (alpha v1.0.6)")
             # Window background must be black, not Qt's default light palette:
             # while the app is hidden/mid-reveal the central widget is
             # transparent, and black reads as transparent on the waveguide

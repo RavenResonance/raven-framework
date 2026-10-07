@@ -116,6 +116,12 @@ class Button(QWidget):
         action_icon_height (int): Height of the action icon in pixels. Width will be scaled proportionally. Defaults to 24.
         action_icon_side_padding (int): Side padding for action icon (40 = 20px on each side). The gap between text and action icon is calculated dynamically to fill remaining space. Defaults to 40.
         show_action_icon (bool): If True, uses default action icon from assets/icons/action_button.png. Defaults to False.
+        content_align (str): 'center' (default) centers icon+text as one group, whose
+            position shifts with text length. 'left' pins the icon (then text) at a
+            fixed content_left_margin from the button's left edge, independent of
+            text length. Defaults to 'center'.
+        content_left_margin (int): Left margin in pixels used when content_align='left'.
+            Defaults to 20.
     """
 
     clicked = Signal()
@@ -162,6 +168,8 @@ class Button(QWidget):
         action_icon_height: int = 35,
         action_icon_side_padding: int = 50,
         show_action_icon: bool = False,
+        content_align: str = "center",
+        content_left_margin: int = 20,
     ):
         """
         Initialize the Button widget.
@@ -191,6 +199,14 @@ class Button(QWidget):
         self.enable_click: bool = enable_click
         self.use_fill_dwell: bool = use_fill_dwell
         self.disabled: bool = disabled
+
+        if content_align not in ("center", "left"):
+            log.warning(
+                f"Unknown content_align '{content_align}', using 'center'"
+            )
+            content_align = "center"
+        self.content_align: str = content_align
+        self.content_left_margin: int = int(content_left_margin)
 
         padding = int(padding)
 
@@ -871,8 +887,10 @@ class Button(QWidget):
                 icon_width + left_gap + text_width + right_gap + action_icon_width
             )
 
-            # Calculate starting x position to center the entire content
-            start_x = (self.width() - total_width) / 2
+            if self.content_align == "left":
+                start_x = float(self.content_left_margin)
+            else:
+                start_x = (self.width() - total_width) / 2
             center_y = (self.height() + text_height) / 2 - fm.descent()
 
             # Draw icon if present (left side)
@@ -1192,8 +1210,10 @@ class Button(QWidget):
                 icon_width + left_gap + text_width + right_gap + action_icon_width
             )
 
-            # Calculate starting x position to center the entire content
-            start_x = (self.width() - total_width) / 2
+            if self.content_align == "left":
+                start_x = float(self.content_left_margin)
+            else:
+                start_x = (self.width() - total_width) / 2
             center_y = (self.height() + text_height) / 2 - fm.descent()
 
             # Draw icon if present (left side)

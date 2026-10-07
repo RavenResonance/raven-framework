@@ -16,8 +16,9 @@ import re
 import threading
 import time
 from enum import Enum
+from typing import Optional
 
-from PySide6.QtCore import QObject, QThread, Qt, Signal
+from PySide6.QtCore import QObject, Qt, QThread, Signal
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QLabel, QSizePolicy, QWidget
 
@@ -29,36 +30,27 @@ _config = load_config()
 
 OVERLAY_FRAME_RATE = _config["fps"]["SIMULATOR_FPS"]
 BACKGROUND_VIDEO_FRAME_RATE = _config["fps"]["SIMULATOR_FPS"]
+VIDEO_DECODE_THREADS = 2
 DISPLAY_RESOLUTION = tuple(_config["resolution"]["DISPLAY_RESOLUTION"])
 INITIAL_CAMERA_FRAMES_TO_DISCARD = _config["peripherals"][
     "INITIAL_CAMERA_FRAMES_TO_DISCARD"
 ]
-OVERLAY_BACKGROUND_VIDEO_DAY_PATH = _config["simulator"][
-    "OVERLAY_BACKGROUND_VIDEO_DAY_PATH"
-]
-OVERLAY_BACKGROUND_VIDEO_NIGHT_PATH = _config["simulator"][
-    "OVERLAY_BACKGROUND_VIDEO_NIGHT_PATH"
-]
-OVERLAY_BACKGROUND_VIDEO_OUTDOORS_PATH = _config["simulator"][
-    "OVERLAY_BACKGROUND_VIDEO_OUTDOORS_PATH"
+OVERLAY_BACKGROUND_VIDEO_ROOM_PATH = _config["simulator"][
+    "OVERLAY_BACKGROUND_VIDEO_ROOM_PATH"
 ]
 
 
 class SimulatorBackgroundPreset(Enum):
     """Enum for simulator background presets."""
 
-    NIGHT = "night"
-    DAY = "day"
-    OUTDOORS = "outdoors"
+    ROOM = "room"
     CAMERA = "camera"
     CUSTOM = "custom"
 
 
-_VIDEO_PRESETS = (
-    SimulatorBackgroundPreset.DAY,
-    SimulatorBackgroundPreset.NIGHT,
-    SimulatorBackgroundPreset.OUTDOORS,
-)
+DEFAULT_BACKGROUND_PRESET = SimulatorBackgroundPreset.ROOM
+
+_VIDEO_PRESETS = (SimulatorBackgroundPreset.ROOM,)
 
 _UPLOAD_VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"}
 _UPLOAD_MAX_FPS = 15.0
@@ -76,7 +68,11 @@ def _list_uploaded_backgrounds(upload_dir: str) -> list[tuple[int, str, bool]]:
         if not match:
             continue
         versions.append(
-            (int(match.group(1)), os.path.join(upload_dir, name), match.group(2) == "mp4")
+            (
+                int(match.group(1)),
+                os.path.join(upload_dir, name),
+                match.group(2) == "mp4",
+            )
         )
     versions.sort(key=lambda item: item[0])
     return versions
@@ -92,6 +88,8 @@ def _resize_cover(frame, target_w: int, target_h: int):
     import cv2
 
     src_h, src_w = frame.shape[:2]
+    if (src_w, src_h) == (target_w, target_h):
+        return frame
     target_aspect = target_w / target_h
     src_aspect = src_w / src_h
     if src_aspect > target_aspect:
@@ -107,10 +105,44 @@ def _resize_cover(frame, target_w: int, target_h: int):
     return resized[crop_y : crop_y + target_h, :]
 
 
+def media_size(path: str, is_video: bool) -> Optional[tuple[int, int]]:
+    """(w, h) or None."""
+    import cv2
+
+    if is_video:
+        capture = cv2.VideoCapture(path)
+        try:
+            width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        finally:
+            capture.release()
+    else:
+        image = cv2.imread(path)
+        height, width = image.shape[:2] if image is not None else (0, 0)
+    if width <= 0 or height <= 0:
+        log.warning(f"Could not read background size from {path}")
+        return None
+    return width, height
+
+
+def default_background_size(framework_dir: str) -> Optional[tuple[int, int]]:
+    """(w, h) or None."""
+    return media_size(
+        os.path.join(framework_dir, OVERLAY_BACKGROUND_VIDEO_ROOM_PATH), True
+    )
+
+
+def _fit_within(src_w: int, src_h: int, max_w: int, max_h: int) -> tuple[int, int]:
+    """Even size, no upscale."""
+    scale = min(1.0, max_w / src_w, max_h / src_h)
+    return max(2, int(src_w * scale) // 2 * 2), max(2, int(src_h * scale) // 2 * 2)
+
+
 def _compress_background_video(
     src_path: str, dest_path: str, resolution: tuple[int, int]
 ) -> bool:
-    """Re-encode src_path to dest_path: strip audio, downscale/crop to resolution, cap frame rate.
+    """Re-encode src_path to dest_path: strip audio, downscale to fit within
+    resolution (aspect kept), cap frame rate.
 
     cv2.VideoWriter has no audio support, so re-encoding through it drops the audio
     track for free. Returns True on success.
@@ -124,8 +156,13 @@ def _compress_background_video(
         src_fps = cap.get(cv2.CAP_PROP_FPS)
         out_fps = min(src_fps, _UPLOAD_MAX_FPS) if src_fps > 0 else _UPLOAD_MAX_FPS
         frame_stride = max(1, round(src_fps / out_fps)) if src_fps > 0 else 1
+        src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        if src_w <= 0 or src_h <= 0:
+            return False
+        out_w, out_h = _fit_within(src_w, src_h, resolution[0], resolution[1])
         writer = cv2.VideoWriter(
-            dest_path, cv2.VideoWriter_fourcc(*"mp4v"), out_fps, resolution
+            dest_path, cv2.VideoWriter_fourcc(*"mp4v"), out_fps, (out_w, out_h)
         )
         if not writer.isOpened():
             return False
@@ -137,7 +174,7 @@ def _compress_background_video(
                 if not ret:
                     break
                 if frame_index % frame_stride == 0:
-                    writer.write(_resize_cover(frame, resolution[0], resolution[1]))
+                    writer.write(_resize_cover(frame, out_w, out_h))
                     wrote_any = True
                 frame_index += 1
             return wrote_any
@@ -150,15 +187,17 @@ def _compress_background_video(
 def _compress_background_image(
     src_path: str, dest_path: str, resolution: tuple[int, int]
 ) -> bool:
-    """Downscale/crop src_path to resolution and re-save as a compressed JPEG."""
     import cv2
 
     image = cv2.imread(src_path)
     if image is None:
         return False
-    resized = _resize_cover(image, resolution[0], resolution[1])
+    out_w, out_h = _fit_within(image.shape[1], image.shape[0], *resolution)
+    resized = _resize_cover(image, out_w, out_h)
     return bool(
-        cv2.imwrite(dest_path, resized, [cv2.IMWRITE_JPEG_QUALITY, _UPLOAD_JPEG_QUALITY])
+        cv2.imwrite(
+            dest_path, resized, [cv2.IMWRITE_JPEG_QUALITY, _UPLOAD_JPEG_QUALITY]
+        )
     )
 
 
@@ -167,7 +206,9 @@ class _BackgroundUploadWorker(QObject):
 
     finished = Signal(str, int, bool, bool)  # (dest_path, version, is_video, success)
 
-    def __init__(self, src_path: str, dest_dir: str, resolution: tuple[int, int]) -> None:
+    def __init__(
+        self, src_path: str, dest_dir: str, resolution: tuple[int, int]
+    ) -> None:
         super().__init__()
         self._src_path = src_path
         self._dest_dir = dest_dir
@@ -219,47 +260,42 @@ class _BackgroundWorker(QObject):
         )
         while not self._stop:
             try:
-                w, h = self._widget.resolution[0], self._widget.resolution[1]
                 background = None
+                image_path = None
+                # FFmpeg crash guard
                 with self._widget._capture_lock:
+                    w, h = self._widget.resolution
                     preset = self._widget.current_preset
                     cam = self._widget.camera_capture
                     vid = self._widget.video_capture
-                    path = self._widget.background_path
-                    custom_is_video = self._widget.custom_is_video
-
-                is_video_preset = preset in _VIDEO_PRESETS or (
-                    preset == SimulatorBackgroundPreset.CUSTOM and custom_is_video
-                )
-
-                if (
-                    preset == SimulatorBackgroundPreset.CAMERA
-                    and cam is not None
-                    and cam.isOpened()
-                ):
-                    ret, background = cam.read()
-                    if not ret or background is None:
-                        continue
-                    background = _resize_cover(background, w, h)
-                elif is_video_preset and vid is not None and vid.isOpened():
-                    ret, background = vid.read()
-                    if not ret or background is None:
-                        vid.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    is_video_preset = preset in _VIDEO_PRESETS or (
+                        preset == SimulatorBackgroundPreset.CUSTOM
+                        and self._widget.custom_is_video
+                    )
+                    if (
+                        preset == SimulatorBackgroundPreset.CAMERA
+                        and cam is not None
+                        and cam.isOpened()
+                    ):
+                        ret, background = cam.read()
+                    elif is_video_preset and vid is not None and vid.isOpened():
                         ret, background = vid.read()
                         if not ret or background is None:
-                            continue
-                    background = _resize_cover(background, w, h)
-                elif path is not None and os.path.exists(path):
-                    background = cv2.imread(path)
-                    if background is not None:
-                        background = _resize_cover(background, w, h)
+                            vid.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                            ret, background = vid.read()
+                    else:
+                        image_path = self._widget.background_path
+
+                if image_path is not None and os.path.exists(image_path):
+                    background = cv2.imread(image_path)
 
                 if background is not None:
-                    composite_rgb = cv2.cvtColor(background, cv2.COLOR_BGR2RGB)
-                    height, width = composite_rgb.shape[:2]
+                    frame_bgr = _resize_cover(background, w, h)
+                    height, width = frame_bgr.shape[:2]
                     with self._widget._frame_lock:
-                        self._widget._latest_frame = composite_rgb.copy()
-                    self.frame_ready.emit(composite_rgb.tobytes(), width, height)
+                        self._widget._latest_frame = frame_bgr
+                    if self._widget.display_frames:
+                        self.frame_ready.emit(frame_bgr.tobytes(), width, height)
             except Exception as e:
                 log.debug(f"BackgroundWorker: {e}")
             time.sleep(interval)
@@ -282,7 +318,7 @@ class SimulatorBackgroundWidget(QWidget):
         super().__init__()
         self.framework_dir = framework_dir
         self.resolution = resolution
-        self.current_preset = SimulatorBackgroundPreset.NIGHT
+        self.current_preset = DEFAULT_BACKGROUND_PRESET
         self.camera_capture = None
         self.video_capture = None
         self.background_path = None
@@ -294,6 +330,7 @@ class SimulatorBackgroundWidget(QWidget):
         self._capture_lock = threading.Lock()
         self._frame_lock = threading.Lock()
         self._latest_frame = None
+        self.display_frames = True
 
         self.background_label = QLabel(self)
         self.background_label.setGeometry(0, 0, self.resolution[0], self.resolution[1])
@@ -320,15 +357,25 @@ class SimulatorBackgroundWidget(QWidget):
 
         log.info("SimulatorBackgroundWidget initialized successfully.")
 
-    def _on_background_frame(self, rgb_bytes: object, w: int, h: int) -> None:
+    def set_resolution(self, resolution: tuple[int, int]) -> None:
+        if resolution == self.resolution:
+            return
+        with self._capture_lock:
+            self.resolution = resolution
+        self.setFixedSize(resolution[0], resolution[1])
+        self.background_label.setGeometry(0, 0, resolution[0], resolution[1])
+
+    def _on_background_frame(self, bgr_bytes: object, w: int, h: int) -> None:
         """Main-thread slot: set background label pixmap from worker."""
+        if not self.isVisible():
+            return
         try:
             q_img = QImage(
-                rgb_bytes,
+                bgr_bytes,
                 w,
                 h,
                 3 * w,
-                QImage.Format.Format_RGB888,
+                QImage.Format.Format_BGR888,
             )
             self.background_label.setPixmap(QPixmap.fromImage(q_img.copy()))
         except Exception as e:
@@ -336,36 +383,23 @@ class SimulatorBackgroundWidget(QWidget):
 
     def get_latest_background(self):
         """Return a copy of the latest background frame (RGB numpy) or None. Thread-safe."""
+        import cv2
+
+        frame = self.get_latest_background_bgr()
+        return None if frame is None else cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+    def get_latest_background_bgr(self):
+        """Read-only, thread-safe."""
         with self._frame_lock:
-            if self._latest_frame is not None:
-                return self._latest_frame.copy()
-        return None
+            return self._latest_frame
 
     def _update_background_path(self) -> None:
         if self.current_preset == SimulatorBackgroundPreset.CAMERA:
             self.background_path = None
-        elif self.current_preset == SimulatorBackgroundPreset.DAY:
+        elif self.current_preset == SimulatorBackgroundPreset.ROOM:
             self.background_path = os.path.join(
                 self.framework_dir,
-                OVERLAY_BACKGROUND_VIDEO_DAY_PATH,
-            )
-        elif self.current_preset == SimulatorBackgroundPreset.NIGHT:
-            self.background_path = os.path.join(
-                self.framework_dir,
-                OVERLAY_BACKGROUND_VIDEO_NIGHT_PATH,
-            )
-        elif self.current_preset == SimulatorBackgroundPreset.OUTDOORS:
-            self.background_path = os.path.join(
-                self.framework_dir,
-                OVERLAY_BACKGROUND_VIDEO_OUTDOORS_PATH,
-            )
-        elif self.current_preset == SimulatorBackgroundPreset.CUSTOM:
-            pass
-        else:
-            self.background_path = os.path.join(
-                self.framework_dir,
-                "overlay_backgrounds",
-                f"{self.current_preset.value}.png",
+                OVERLAY_BACKGROUND_VIDEO_ROOM_PATH,
             )
 
     def _open_camera(self) -> bool:
@@ -406,7 +440,13 @@ class SimulatorBackgroundWidget(QWidget):
             if self.background_path is None or not os.path.exists(self.background_path):
                 log.error(f"Video file not found: {self.background_path}")
                 return False
-            self.video_capture = cv2.VideoCapture(self.background_path)
+            self.video_capture = cv2.VideoCapture(
+                self.background_path,
+                cv2.CAP_FFMPEG,
+                [cv2.CAP_PROP_N_THREADS, VIDEO_DECODE_THREADS],
+            )
+            if not self.video_capture.isOpened():
+                self.video_capture = cv2.VideoCapture(self.background_path)
             if not self.video_capture.isOpened():
                 log.error(f"Could not open video: {self.background_path}")
                 self.video_capture = None
