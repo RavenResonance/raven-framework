@@ -217,6 +217,120 @@ def test_fade_out_schedules(qtbot: QtBot) -> None:
     assert hasattr(w, "_fade_animation")
 
 
+def test_fade_in_removes_its_effect_once_fully_opaque(qtbot: QtBot) -> None:
+    w = QWidget()
+    qtbot.addWidget(w)
+    fade_in(w, duration=100)
+    qtbot.wait(300)
+    # A QGraphicsOpacityEffect at opacity 1.0 draws nothing different, but it stays attached:
+    # it forces the subtree through an offscreen buffer on every repaint and changes how
+    # QWidget.render() positions it (see test_render_is_not_displaced_after_fade_in).
+    assert w.graphicsEffect() is None
+
+
+def test_fade_out_keeps_its_effect_so_the_widget_stays_hidden(qtbot: QtBot) -> None:
+    from PySide6.QtWidgets import QGraphicsOpacityEffect
+
+    w = QWidget()
+    qtbot.addWidget(w)
+    fade_out(w, duration=100)
+    qtbot.wait(300)
+    effect = w.graphicsEffect()
+    assert isinstance(effect, QGraphicsOpacityEffect)
+    assert effect.opacity() == 0.0
+
+
+def test_fade_in_can_be_repeated_after_its_effect_was_removed(qtbot: QtBot) -> None:
+    from PySide6.QtWidgets import QGraphicsOpacityEffect
+
+    w = QWidget()
+    qtbot.addWidget(w)
+    fade_in(w, duration=100)
+    qtbot.wait(300)
+    assert w.graphicsEffect() is None
+    fade_in(w, start_value=0.0, end_value=1.0, duration=100)
+    qtbot.wait(20)
+    assert isinstance(w.graphicsEffect(), QGraphicsOpacityEffect)  # a fresh effect is created
+    qtbot.wait(300)
+    assert w.graphicsEffect() is None
+
+
+def test_an_older_fade_finishing_does_not_remove_a_newer_fades_effect(qtbot: QtBot) -> None:
+    from PySide6.QtWidgets import QGraphicsOpacityEffect
+
+    w = QWidget()
+    qtbot.addWidget(w)
+    fade_in(w, duration=100)
+    qtbot.wait(30)
+    fade_out(w, duration=400)  # reuses the same effect; the fade_in finishes while this is running
+    qtbot.wait(800)
+    effect = w.graphicsEffect()
+    assert isinstance(effect, QGraphicsOpacityEffect)
+    assert effect.opacity() == 0.0  # the widget is still faded out, not stuck visible
+
+
+def test_a_partial_fade_in_keeps_its_effect(qtbot: QtBot) -> None:
+    from PySide6.QtWidgets import QGraphicsOpacityEffect
+
+    w = QWidget()
+    qtbot.addWidget(w)
+    fade_in(w, start_value=0.0, end_value=0.5, duration=100)
+    qtbot.wait(300)
+    effect = w.graphicsEffect()
+    assert isinstance(effect, QGraphicsOpacityEffect)
+    assert effect.opacity() == pytest.approx(0.5)
+
+
+def test_render_is_not_displaced_after_fade_in(qtbot: QtBot) -> None:
+    """After fade_in, a child that moves must still render where it is.
+
+    While a QGraphicsOpacityEffect stays on the faded container, `QWidget.render()` draws any child
+    that changes afterwards (moves, or is added) displaced by the container's own offset inside its
+    parent, and keeps doing so after repaints. The Raven simulator draws every app with
+    `QWidget.render()`, so an app that called fade_in(self.app) and then updated its widgets showed
+    up away from where the simulator sends the mouse.
+    """
+    from PySide6.QtCore import QPoint
+    from PySide6.QtGui import QImage, QPainter, QRegion
+    from PySide6.QtWidgets import QFrame
+
+    parent = QWidget()
+    parent.resize(400, 400)
+    container = QWidget(parent)
+    container.setGeometry(40, 50, 300, 300)  # offset inside its parent, like RavenApp.app
+    marker = QFrame(container)
+    marker.setGeometry(10, 10, 20, 20)
+    marker.setStyleSheet("background-color: rgb(255, 0, 0);")
+    qtbot.addWidget(parent)
+    parent.show()
+
+    fade_in(container, duration=100)
+    qtbot.wait(300)
+
+    marker.move(100, 120)  # the app updates its widgets after the fade, as any app does
+
+    image = QImage(400, 400, QImage.Format.Format_RGB32)
+    image.fill(0)
+    painter = QPainter(image)
+    parent.render(
+        painter,
+        QPoint(0, 0),
+        QRegion(),
+        QWidget.RenderFlag.DrawWindowBackground | QWidget.RenderFlag.DrawChildren,
+    )
+    painter.end()
+
+    red = [
+        (x, y)
+        for y in range(400)
+        for x in range(400)
+        if image.pixelColor(x, y).red() > 200 and image.pixelColor(x, y).green() < 60
+    ]
+    assert red, "the marker was not rendered at all"
+    # The marker is at (100, 120) inside a container at (40, 50): (140, 170) in the parent.
+    assert (min(x for x, _ in red), min(y for _, y in red)) == (140, 170)
+
+
 # =============================================================================
 # routine / async_runner
 # =============================================================================

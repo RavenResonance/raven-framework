@@ -234,6 +234,25 @@ def _fade_widget(
             )
             fade_anim.start()
             widget._fade_animation = fade_anim
+
+            def remove_effect_once_opaque() -> None:
+                # At full opacity the effect draws nothing different, but left attached it forces
+                # the widget's subtree through an offscreen buffer on every repaint, and
+                # QWidget.render() (which the simulator uses to draw the app) displaces any child
+                # that changes afterwards by this widget's own offset inside its parent.
+                # Only remove it if this is still the widget's current fade: a newer fade_in /
+                # fade_out reuses the same effect and must keep it.
+                try:
+                    if (
+                        getattr(widget, "_fade_animation", None) is fade_anim
+                        and widget.graphicsEffect() is effect
+                        and effect.opacity() >= 1.0
+                    ):
+                        widget.setGraphicsEffect(None)
+                except RuntimeError:
+                    pass  # the widget or its effect was already deleted
+
+            fade_anim.finished.connect(remove_effect_once_opaque)
         except RuntimeError as e:
             log.warning(f"fade animation target died before deferred start: {e}")
             # widget (or its effect) was torn down between this being
