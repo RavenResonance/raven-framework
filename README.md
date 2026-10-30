@@ -1,4 +1,4 @@
-# Raven Framework (alpha v1.0.6)
+# Raven Framework (alpha v1.0.7)
 
 <img src="assets/documentation/logo/horizontal.png" width="100%" alt="Raven Framework Logo">
 
@@ -9,7 +9,7 @@ A comprehensive UI framework and API for building gaze-based applications for Ra
 
 The framework is being developed by Raven Resonance, a team of engineers and designers who have built and used wearable computers for years. [Raven Prism 1](https://raven.computer) will be out soon and runs RavenOS, a Linux-based operating system designed for all-day wear. This repo contains a preview of Raven Framework and is the first part of the Raven SDK. We would love to hear your feedback in our [Discord community](https://raven.computer/s/discord)!
 
-`version = "1.0.6"`
+`version = "1.0.7"`
 
 
 ## Table of Contents
@@ -1310,7 +1310,7 @@ The Raven Framework repository includes an `AGENTS.md` file that contains conden
 
 ## License
 
-This project is proprietary software. The Raven Framework code and documentation are proprietary and may not be redistributed, modified, or used except as expressly permitted by RavenResonance. Do not push the Raven Framework code to public repositories or distribute it without authorization.
+The Raven Framework is proprietary, source-available software owned by Raven Resonance, Inc. You may install and run it, including the desktop simulator, and use it to develop, test, and run your own applications built on its public APIs. You may not modify, redistribute, or sublicense the Framework without explicit written permission — do not push the Raven Framework code to public repositories or distribute it without authorization. See [LICENSE](LICENSE) for the full terms.
 
 Contributions are welcome under the terms of the [Contributor License Agreement](CLA.md), which must be signed before any Contribution can be accepted.
 
