@@ -791,7 +791,7 @@ class SimulatorRunApp(QMainWindow):
             import cv2
 
             cv2.setNumThreads(SIMULATOR_CV_THREADS)
-            self.setWindowTitle("Raven App (alpha v1.0.6)")
+            self.setWindowTitle("Raven App (alpha v1.0.7)")
             total_window_width = APP_WINDOW_RESOLUTION[0]
             total_window_height = (
                 APP_WINDOW_RESOLUTION[1] + CLIENT_DEVICE_ADDITIONAL_WINDOW_HEIGHT
